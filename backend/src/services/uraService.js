@@ -64,9 +64,15 @@ async function fetchNewToken() {
 }
 
 /**
- * Get valid token (auto-refresh if expired)
+ * Get valid token (use manual token or auto-refresh if expired)
  */
 async function getValidToken() {
+  // If manual token is provided in environment, use it
+  if (process.env.URA_TOKEN) {
+    console.log('🔑 Using manual token from environment');
+    return process.env.URA_TOKEN;
+  }
+  
   // Check if we have a valid cached token
   if (tokenCache.token && tokenCache.expiresAt && Date.now() < tokenCache.expiresAt) {
     const hoursLeft = Math.round((tokenCache.expiresAt - Date.now()) / 1000 / 60 / 60);
