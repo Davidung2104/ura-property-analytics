@@ -124,7 +124,7 @@ export default function App() {
 
   const latestFilteredYear = useMemo(() => {
     if (!filtered.length) return null;
-    return Math.max(...filtered.map(t => t.year));
+    return filtered.reduce((m, t) => t.year > m ? t.year : m, 0);
   }, [filtered]);
 
   // ===== COMPUTED DATA =====
