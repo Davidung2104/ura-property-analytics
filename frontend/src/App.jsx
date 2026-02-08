@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, PieChart, Pie, Cell, Legend, ScatterChart, Scatter, ZAxis, AreaChart, Area, ComposedChart, ReferenceLine } from 'recharts';
-import { getTransactions } from './services/api';
+import { getTransactions, getRentals } from './services/api';
 
 const COLORS = ['#0ea5e9','#6366f1','#8b5cf6','#f43f5e','#10b981','#f59e0b','#ec4899','#14b8a6','#ef4444','#3b82f6','#a855f7','#d946ef','#06b6d4','#84cc16','#fb923c','#64748b','#e11d48','#0d9488','#7c3aed','#ca8a04','#dc2626','#2563eb','#9333ea','#c026d3','#0891b2','#65a30d','#ea580c','#475569','#be123c','#0f766e'];
 
@@ -22,7 +22,9 @@ const CustomTooltip = ({ active, payload, label, prefix = '$', suffix = '' }) =>
 
 export default function App() {
   const [allTransactions, setAllTransactions] = useState([]);
+  const [allRentals, setAllRentals] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [rentalLoading, setRentalLoading] = useState(false);
   const [error, setError] = useState(null);
 
   // Filters
@@ -39,6 +41,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('overview');
   const [heatmapMetric, setHeatmapMetric] = useState('psf');
   const [showDiff, setShowDiff] = useState(false);
+  const [rentalBedroom, setRentalBedroom] = useState('All');
 
   // Load data from API
   useEffect(() => {
@@ -57,6 +60,25 @@ export default function App() {
     }
     loadData();
   }, []);
+
+  // Load rental data when rental tab is first opened
+  useEffect(() => {
+    if (activeTab === 'rental' && allRentals.length === 0 && !rentalLoading) {
+      async function loadRentals() {
+        try {
+          setRentalLoading(true);
+          const rentals = await getRentals();
+          setAllRentals(rentals);
+          console.log(`Loaded ${rentals.length} rental records`);
+        } catch (err) {
+          console.error('Failed to load rentals:', err);
+        } finally {
+          setRentalLoading(false);
+        }
+      }
+      loadRentals();
+    }
+  }, [activeTab]);
 
   // Derived filter options
   const allYears = useMemo(() => [...new Set(allTransactions.map(t => t.year))].sort(), [allTransactions]);
@@ -210,8 +232,168 @@ export default function App() {
     return Object.entries(yearMap).sort(([a],[b]) => a.localeCompare(b)).map(([year, dists]) => ({ year, ...dists }));
   }, [filtered]);
 
+  // ===== RENTAL COMPUTED DATA =====
+  const filteredRentals = useMemo(() => {
+    return allRentals.filter(r =>
+      (selectedDistricts.length === 0 || selectedDistricts.includes(r.district)) &&
+      (rentalBedroom === 'All' || r.noOfBedRoom === rentalBedroom)
+    );
+  }, [allRentals, selectedDistricts, rentalBedroom]);
+
+  const rentalBedrooms = useMemo(() => ['All', ...new Set(allRentals.map(r => r.noOfBedRoom).filter(Boolean))].sort(), [allRentals]);
+
+  // Parse rental area range to midpoint sqft
+  const parseAreaMid = (areaSqft) => {
+    if (!areaSqft) return 0;
+    const parts = areaSqft.split('-').map(s => parseFloat(s.trim()));
+    if (parts.length === 2 && parts[0] > 0 && parts[1] > 0) return (parts[0] + parts[1]) / 2;
+    return parts[0] || 0;
+  };
+
+  // Parse leaseDate "MMYY" to quarter label
+  const parseLeaseQuarter = (ld) => {
+    if (!ld || ld.length !== 4) return null;
+    const mm = parseInt(ld.substring(0, 2));
+    const yy = parseInt(ld.substring(2, 4));
+    const year = yy > 50 ? 1900 + yy : 2000 + yy;
+    const q = Math.ceil(mm / 3);
+    return { label: `${year} Q${q}`, year, quarter: q, sortKey: year * 10 + q };
+  };
+
+  const rentalStats = useMemo(() => {
+    if (!filteredRentals.length) return { count: 0, avgRent: 0, medianRent: 0, avgRentPsf: 0 };
+    const rents = filteredRentals.map(r => r.rent).sort((a,b) => a-b);
+    const rentPsfs = filteredRentals.map(r => { const mid = parseAreaMid(r.areaSqft); return mid > 0 ? r.rent / mid : 0; }).filter(v => v > 0);
+    return {
+      count: filteredRentals.length,
+      avgRent: Math.round(rents.reduce((s,v) => s+v, 0) / rents.length),
+      medianRent: rents[Math.floor(rents.length / 2)],
+      avgRentPsf: rentPsfs.length ? Math.round((rentPsfs.reduce((s,v) => s+v, 0) / rentPsfs.length) * 100) / 100 : 0,
+    };
+  }, [filteredRentals]);
+
+  // Rent trend by quarter
+  const rentalTrend = useMemo(() => {
+    const map = {};
+    filteredRentals.forEach(r => {
+      const q = parseLeaseQuarter(r.leaseDate);
+      if (!q) return;
+      if (!map[q.sortKey]) map[q.sortKey] = { label: q.label, rents: [], sortKey: q.sortKey };
+      map[q.sortKey].rents.push(r.rent);
+    });
+    return Object.values(map).sort((a,b) => a.sortKey - b.sortKey).map(q => ({
+      quarter: q.label,
+      avgRent: Math.round(q.rents.reduce((s,v) => s+v, 0) / q.rents.length),
+      count: q.rents.length,
+    }));
+  }, [filteredRentals]);
+
+  // Rent by district
+  const rentalByDistrict = useMemo(() => {
+    const map = {};
+    filteredRentals.forEach(r => {
+      if (!map[r.district]) map[r.district] = { rents: [], count: 0 };
+      map[r.district].rents.push(r.rent);
+      map[r.district].count++;
+    });
+    return Object.entries(map).sort(([a],[b]) => a.localeCompare(b)).map(([d, v]) => ({
+      district: `D${d}`,
+      avgRent: Math.round(v.rents.reduce((s,r) => s+r, 0) / v.rents.length),
+      count: v.count,
+    }));
+  }, [filteredRentals]);
+
+  // Rent by bedroom
+  const rentalByBedroom = useMemo(() => {
+    const map = {};
+    filteredRentals.forEach(r => {
+      const bed = r.noOfBedRoom || 'N/A';
+      if (!map[bed]) map[bed] = { rents: [], count: 0 };
+      map[bed].rents.push(r.rent);
+      map[bed].count++;
+    });
+    return Object.entries(map).sort(([a],[b]) => { if (a === 'N/A') return 1; if (b === 'N/A') return -1; return a.localeCompare(b); }).map(([bed, v]) => ({
+      bedroom: bed === 'N/A' ? 'Unknown' : `${bed} BR`,
+      avgRent: Math.round(v.rents.reduce((s,r) => s+r, 0) / v.rents.length),
+      count: v.count,
+    }));
+  }, [filteredRentals]);
+
+  // Rent PSF by district
+  const rentalPsfByDistrict = useMemo(() => {
+    const map = {};
+    filteredRentals.forEach(r => {
+      const mid = parseAreaMid(r.areaSqft);
+      if (mid <= 0) return;
+      const rentPsf = r.rent / mid;
+      if (!map[r.district]) map[r.district] = { psfs: [], count: 0 };
+      map[r.district].psfs.push(rentPsf);
+      map[r.district].count++;
+    });
+    return Object.entries(map).sort(([a],[b]) => a.localeCompare(b)).map(([d, v]) => ({
+      district: `D${d}`,
+      rentPsf: Math.round((v.psfs.reduce((s,r) => s+r, 0) / v.psfs.length) * 100) / 100,
+      count: v.count,
+    }));
+  }, [filteredRentals]);
+
+  // Rental yield by district (annual rent / purchase price PSF)
+  const rentalYield = useMemo(() => {
+    if (!filteredRentals.length || !filtered.length) return [];
+    // Get avg rent PSF per district
+    const rentMap = {};
+    filteredRentals.forEach(r => {
+      const mid = parseAreaMid(r.areaSqft);
+      if (mid <= 0) return;
+      if (!rentMap[r.district]) rentMap[r.district] = [];
+      rentMap[r.district].push(r.rent / mid);
+    });
+    // Get avg purchase PSF per district
+    const buyMap = {};
+    filtered.forEach(t => {
+      if (!buyMap[t.district]) buyMap[t.district] = [];
+      buyMap[t.district].push(t.psf);
+    });
+    // Calculate yield where both exist
+    const results = [];
+    Object.keys(rentMap).forEach(d => {
+      if (!buyMap[d]) return;
+      const avgRentPsf = rentMap[d].reduce((s,v) => s+v, 0) / rentMap[d].length;
+      const avgBuyPsf = buyMap[d].reduce((s,v) => s+v, 0) / buyMap[d].length;
+      if (avgBuyPsf <= 0) return;
+      const annualYield = (avgRentPsf * 12 / avgBuyPsf) * 100;
+      results.push({
+        district: `D${d}`,
+        rentPsf: Math.round(avgRentPsf * 100) / 100,
+        buyPsf: Math.round(avgBuyPsf),
+        yield: Math.round(annualYield * 100) / 100,
+      });
+    });
+    return results.sort((a,b) => b.yield - a.yield);
+  }, [filteredRentals, filtered]);
+
+  // Rent trend by district (quarterly)
+  const rentalDistrictTrend = useMemo(() => {
+    const map = {};
+    filteredRentals.forEach(r => {
+      const q = parseLeaseQuarter(r.leaseDate);
+      if (!q) return;
+      const key = q.sortKey;
+      if (!map[key]) map[key] = { label: q.label, sortKey: q.sortKey, districts: {} };
+      if (!map[key].districts[r.district]) map[key].districts[r.district] = [];
+      map[key].districts[r.district].push(r.rent);
+    });
+    return Object.values(map).sort((a,b) => a.sortKey - b.sortKey).map(q => {
+      const row = { quarter: q.label };
+      Object.entries(q.districts).forEach(([d, rents]) => { row[`D${d}`] = Math.round(rents.reduce((s,v) => s+v, 0) / rents.length); });
+      return row;
+    });
+  }, [filteredRentals]);
+
+  const activeRentalDistricts = useMemo(() => { const s = new Set(); filteredRentals.forEach(r => s.add(r.district)); return [...s].sort(); }, [filteredRentals]);
+
   // ===== HELPERS =====
-  const tabs = [{ id: 'overview', label: '📊 Overview' }, { id: 'districts', label: '📍 Districts' }, { id: 'advanced', label: '📈 Advanced' }, { id: 'floor', label: '🏢 Floor Analysis' }];
+  const tabs = [{ id: 'overview', label: '📊 Overview' }, { id: 'districts', label: '📍 Districts' }, { id: 'advanced', label: '📈 Advanced' }, { id: 'floor', label: '🏢 Floor Analysis' }, { id: 'rental', label: '🏠 Rental' }];
   const formatCurrency = (v) => `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
   const formatCompactNumber = (v) => { const abs = Math.abs(v); const sign = v < 0 ? '-' : ''; if (abs >= 1e6) return `${sign}${(abs/1e6).toFixed(2)}M`; if (abs >= 1e3) return `${sign}${(abs/1e3).toFixed(0)}K`; return `${sign}${Math.round(abs)}`; };
   
@@ -527,10 +709,180 @@ export default function App() {
             </div>
           </div>
         )}
+        {activeTab === 'rental' && (
+          <div>
+            {rentalLoading ? (
+              <div style={{ textAlign: 'center', padding: '60px 0' }}>
+                <div style={{ width: 40, height: 40, border: '3px solid rgba(56,189,248,0.2)', borderTopColor: '#38bdf8', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 16px' }} />
+                <p style={{ color: '#94a3b8', fontSize: 13 }}>Loading rental data...</p>
+                <p style={{ color: '#475569', fontSize: 11, marginTop: 4 }}>Fetching quarterly data (this may take a moment)</p>
+                <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+              </div>
+            ) : filteredRentals.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '60px 0', color: '#64748b' }}>
+                <div style={{ fontSize: 40, marginBottom: 12 }}>🏠</div>
+                <p style={{ fontSize: 14 }}>No rental data available</p>
+                <p style={{ fontSize: 12, marginTop: 4 }}>Rental data may not be available for all periods</p>
+              </div>
+            ) : (
+              <div>
+                {/* Rental Filter */}
+                <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'center' }}>
+                  <select value={rentalBedroom} onChange={e => setRentalBedroom(e.target.value)} style={{ ...bs, minWidth: 120 }}>
+                    {rentalBedrooms.map(b => <option key={b} value={b}>Bedrooms: {b}</option>)}
+                  </select>
+                  <span style={{ color: '#475569', fontSize: 11 }}>{filteredRentals.length.toLocaleString()} rental contracts</span>
+                </div>
+
+                {/* Rental Stats */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
+                  {[
+                    { label: 'Rental Contracts', value: rentalStats.count.toLocaleString(), color: '#38bdf8', icon: '📋' },
+                    { label: 'Avg Monthly Rent', value: `$${rentalStats.avgRent.toLocaleString()}`, color: '#34d399', icon: '💵' },
+                    { label: 'Median Rent', value: `$${rentalStats.medianRent.toLocaleString()}`, color: '#f472b6', icon: '📊' },
+                    { label: 'Avg Rent PSF', value: `$${rentalStats.avgRentPsf}`, color: '#fb923c', icon: '📐' },
+                  ].map((s, i) => (
+                    <div key={i} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 12, padding: '14px 16px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                        <span style={{ color: '#64748b', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{s.label}</span>
+                        <span style={{ fontSize: 14 }}>{s.icon}</span>
+                      </div>
+                      <div style={{ color: s.color, fontSize: 18, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>{s.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                  {/* Rent Trend */}
+                  <div style={cardStyle}>
+                    <h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>📈 Rental Trend (Quarterly)</h3>
+                    <div style={{ height: 280 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={rentalTrend}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" />
+                          <XAxis dataKey="quarter" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} angle={-30} textAnchor="end" height={50} />
+                          <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} />
+                          <Tooltip content={<CustomTooltip />} />
+                          <Bar dataKey="avgRent" name="Avg Rent" fill="#6366f1" radius={[4,4,0,0]} barSize={16} />
+                          <Line dataKey="avgRent" name="Trend" stroke="#38bdf8" strokeWidth={2} dot={false} />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  {/* Rent by Bedroom */}
+                  <div style={cardStyle}>
+                    <h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>🛏️ Rent by Bedroom Count</h3>
+                    <div style={{ height: 280 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={rentalByBedroom}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" />
+                          <XAxis dataKey="bedroom" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} />
+                          <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} />
+                          <Tooltip content={<CustomTooltip />} />
+                          <Bar dataKey="avgRent" name="Avg Rent" radius={[6,6,0,0]} barSize={40}>
+                            {rentalByBedroom.map((e, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  {/* Rent by District */}
+                  <div style={cardStyle}>
+                    <h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>📍 Avg Rent by District</h3>
+                    <div style={{ height: 280 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={rentalByDistrict}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" />
+                          <XAxis dataKey="district" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} />
+                          <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} />
+                          <Tooltip content={<CustomTooltip />} />
+                          <Bar dataKey="avgRent" name="Avg Rent" fill="#14b8a6" radius={[4,4,0,0]} barSize={16} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  {/* Rent PSF by District */}
+                  <div style={cardStyle}>
+                    <h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>📐 Rent PSF by District</h3>
+                    <div style={{ height: 280 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={rentalPsfByDistrict}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" />
+                          <XAxis dataKey="district" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} />
+                          <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toFixed(1)}`} />
+                          <Tooltip content={<CustomTooltip />} />
+                          <Bar dataKey="rentPsf" name="Rent PSF" fill="#f59e0b" radius={[4,4,0,0]} barSize={16} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+
+                  {/* Rental Yield */}
+                  <div style={{ gridColumn: '1 / -1', ...cardStyle }}>
+                    <h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 4 }}>💰 Estimated Gross Rental Yield by District</h3>
+                    <p style={{ color: '#64748b', fontSize: 11, marginBottom: 16 }}>Annual Rent ÷ Purchase Price PSF • based on {yearRangeLabel} data</p>
+                    {rentalYield.length === 0 ? (
+                      <p style={{ color: '#475569', fontSize: 12, textAlign: 'center', padding: 20 }}>Need both rental and transaction data to calculate yield</p>
+                    ) : (
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                        <div style={{ height: 320 }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={rentalYield} layout="vertical">
+                              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.06)" />
+                              <XAxis type="number" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `${v}%`} />
+                              <YAxis dataKey="district" type="category" width={50} tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} />
+                              <Tooltip content={({ payload }) => { if (!payload?.length) return null; const d = payload[0]?.payload; return (<div style={{ background: 'rgba(15,23,42,0.95)', padding: '10px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', fontSize: 11, color: '#e2e8f0' }}><p style={{ fontWeight: 600, marginBottom: 6 }}>{d?.district}</p><p>Yield: <span style={{ color: '#34d399' }}>{d?.yield}%</span></p><p>Rent PSF: ${d?.rentPsf}/mo</p><p>Buy PSF: ${d?.buyPsf?.toLocaleString()}</p></div>); }} />
+                              <Bar dataKey="yield" name="Yield %" radius={[0,6,6,0]} barSize={16}>
+                                {rentalYield.map((e, i) => <Cell key={i} fill={e.yield >= 3 ? '#22c55e' : e.yield >= 2.5 ? '#f59e0b' : '#ef4444'} />)}
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                        <div style={{ overflowX: 'auto' }}>
+                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                            <thead><tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>{['District', 'Rent PSF/mo', 'Buy PSF', 'Gross Yield'].map(h => <th key={h} style={{ color: '#94a3b8', fontWeight: 500, padding: '10px 12px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                            <tbody>{rentalYield.map((r, i) => (
+                              <tr key={r.district} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)' }}>
+                                <td style={{ color: '#e2e8f0', padding: '10px 12px', fontWeight: 600, fontFamily: "'JetBrains Mono', monospace" }}>{r.district}</td>
+                                <td style={{ color: '#f59e0b', padding: '10px 12px', fontFamily: "'JetBrains Mono', monospace" }}>${r.rentPsf}</td>
+                                <td style={{ color: '#38bdf8', padding: '10px 12px', fontFamily: "'JetBrains Mono', monospace" }}>${r.buyPsf.toLocaleString()}</td>
+                                <td style={{ color: r.yield >= 3 ? '#22c55e' : r.yield >= 2.5 ? '#f59e0b' : '#ef4444', padding: '10px 12px', fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>{r.yield}%</td>
+                              </tr>
+                            ))}</tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* District Rent Trend */}
+                  <div style={{ gridColumn: '1 / -1', ...cardStyle }}>
+                    <h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>📍 Rental Trend by District (Quarterly)</h3>
+                    <div style={{ height: 380 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={rentalDistrictTrend}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" />
+                          <XAxis dataKey="quarter" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} />
+                          <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} />
+                          <Tooltip content={<CustomTooltip />} />
+                          <Legend wrapperStyle={{ fontSize: 10, color: '#94a3b8' }} />
+                          {activeRentalDistricts.slice(0, 15).map((d, i) => <Line key={d} type="monotone" dataKey={`D${d}`} name={`D${d}`} stroke={COLORS[i % COLORS.length]} strokeWidth={1.5} dot={false} connectNulls />)}
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <div style={{ textAlign: 'center', padding: '20px 28px', borderTop: '1px solid rgba(255,255,255,0.06)', color: '#475569', fontSize: 11 }}>
-        URA Property Analytics Dashboard • {filtered.length.toLocaleString()} filtered transactions • All values shown without rounding
+        URA Property Analytics Dashboard • {filtered.length.toLocaleString()} transactions{allRentals.length > 0 ? ` • ${allRentals.length.toLocaleString()} rental contracts` : ''} • All values shown without rounding
       </div>
     </div>
   );
