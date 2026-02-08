@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3001;
 // CONFIG
 // ============================================================
 const URA_ACCESS_KEY = process.env.URA_ACCESS_KEY;
-const URA_TOKEN_URL = 'https://www.ura.gov.sg/uraDataService/insertNewToken.action';
+const URA_TOKEN_URL = 'https://eservice.ura.gov.sg/uraDataService/insertNewToken/v1';
 const URA_DATA_URL = 'https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1';
 
 // ============================================================
