@@ -121,57 +121,64 @@ export async function getTransactions() {
   }
 }
 
-// Fetch rental data
+// Fetch rental data - parallel fetching for speed
 export async function getRentals() {
   const allRentals = [];
   
-  // Generate refPeriods for last 5 years of quarters
+  // Generate refPeriods for last 3 years of quarters
   const now = new Date();
   const refPeriods = [];
-  for (let y = now.getFullYear() - 5; y <= now.getFullYear(); y++) {
+  for (let y = now.getFullYear() - 3; y <= now.getFullYear(); y++) {
     for (let q = 1; q <= 4; q++) {
       const yy = String(y).slice(2);
       refPeriods.push(`${yy}q${q}`);
     }
   }
 
-  for (const refPeriod of refPeriods) {
+  // Fetch a single quarter
+  async function fetchQuarter(refPeriod) {
     try {
       const res = await fetch(`${API_URL}/api/rentals?refPeriod=${refPeriod}`);
-      if (!res.ok) continue;
+      if (!res.ok) return [];
       const data = await res.json();
 
-      // Handle both formats
       const results = data.Result || (data.success ? data.data : null);
-      if (!results || !Array.isArray(results)) continue;
+      if (!results || !Array.isArray(results)) return [];
 
-      if (results.length > 0 && results[0].rental) {
-        // Raw URA format with nested rentals
-        results.forEach(project => {
-          if (project.rental) {
-            project.rental.forEach(r => {
-              allRentals.push({
-                project: project.project || '',
-                street: project.street || '',
-                district: r.district || '',
-                propertyType: r.propertyType || '',
-                areaSqm: r.areaSqm || '',
-                areaSqft: r.areaSqft || '',
-                rent: parseFloat(r.rent) || 0,
-                leaseDate: r.leaseDate || '',
-                noOfBedRoom: r.noOfBedRoom || '',
-                refPeriod,
-              });
+      const rentals = [];
+      results.forEach(project => {
+        if (project.rental) {
+          project.rental.forEach(r => {
+            rentals.push({
+              project: project.project || '',
+              street: project.street || '',
+              district: r.district || '',
+              propertyType: r.propertyType || '',
+              areaSqm: r.areaSqm || '',
+              areaSqft: r.areaSqft || '',
+              rent: parseFloat(r.rent) || 0,
+              leaseDate: r.leaseDate || '',
+              noOfBedRoom: r.noOfBedRoom || '',
+              refPeriod,
             });
-          }
-        });
-      }
-
-      console.log(`Rentals ${refPeriod}: loaded`);
+          });
+        }
+      });
+      console.log(`Rentals ${refPeriod}: ${rentals.length} records`);
+      return rentals;
     } catch (err) {
       console.warn(`Rentals ${refPeriod} error:`, err.message);
+      return [];
     }
   }
 
+  // Fetch all quarters in parallel (4 at a time)
+  for (let i = 0; i < refPeriods.length; i += 4) {
+    const batch = refPeriods.slice(i, i + 4);
+    const results = await Promise.all(batch.map(fetchQuarter));
+    results.forEach(rentals => allRentals.push(...rentals));
+  }
+
+  console.log(`Total rentals loaded: ${allRentals.length}`);
   return allRentals;
 }
