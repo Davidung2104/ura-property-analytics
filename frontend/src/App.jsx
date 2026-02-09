@@ -1,417 +1,1003 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line, PieChart, Pie, Cell, Legend, ScatterChart, Scatter, ZAxis, AreaChart, Area, ComposedChart, ReferenceLine } from 'recharts';
-const COLORS = ['#0ea5e9','#6366f1','#8b5cf6','#f43f5e','#10b981','#f59e0b','#ec4899','#14b8a6','#ef4444','#3b82f6','#a855f7','#d946ef','#06b6d4','#84cc16','#fb923c','#64748b','#e11d48','#0d9488','#7c3aed','#ca8a04'];
-const SC = { CCR:'#ef4444', RCR:'#f59e0b', OCR:'#22c55e' };
-const S2F = 10.764;
-const mono = "'JetBrains Mono',monospace";const fm=mono;const cp='pointer';
-const genTx = () => {
-const P=[{n:"MARINA ONE RESIDENCES",d:"01",s:"MARINA WAY",seg:"CCR",ty:"Apartment",ten:"99 yrs",bp:28000},{n:"THE SAIL @ MARINA BAY",d:"01",s:"MARINA BLVD",seg:"CCR",ty:"Apartment",ten:"99 yrs",bp:22000},{n:"RIVIERE",d:"03",s:"JIAK KIM ST",seg:"CCR",ty:"Condominium",ten:"FH",bp:30000},{n:"ARDMORE THREE",d:"09",s:"ARDMORE PARK",seg:"CCR",ty:"Condominium",ten:"FH",bp:42000},{n:"BOULEVARD 88",d:"10",s:"ORCHARD BLVD",seg:"CCR",ty:"Condominium",ten:"FH",bp:45000},{n:"LEEDON GREEN",d:"10",s:"LEEDON HTS",seg:"CCR",ty:"Condominium",ten:"FH",bp:28000}];
-const FL=["01-05","06-10","11-15","16-20","21-25","26-30","31-35","36-40"];const AR=[50,65,80,95,110,130,160,200];
-const MO=[];for(let y=2022;y<=2025;y++) for(let m=1;m<=(y===2025?6:12);m++) MO.push(`${y}-${String(m).padStart(2,'0')}`);
-const TOS=["New Sale","Resale","Sub Sale"];
-const tx=[];let id=0;
-P.forEach(p=>{const n=8+Math.floor(Math.random()*12);for(let i=0;i<n;i++){const mo=MO[Math.floor(Math.random()*MO.length)];const y=parseInt(mo.split('-')[0]);const yf=1+(y-2022)*0.05+(Math.random()-0.5)*0.06;const fl=FL[Math.floor(Math.random()*FL.length)];const fi=FL.indexOf(fl);const fp=1+fi*0.02;const ar=AR[Math.floor(Math.random()*AR.length)];const psm=p.bp*yf*fp*(0.92+Math.random()*0.16);const tos=y<=2022?TOS[0]:TOS[Math.floor(Math.random()*3)];tx.push({id:id++,project:p.n,street:p.s,district:p.d,floorRange:fl,areaNum:ar,areaSqft:Math.round(ar*S2F),priceNum:Math.round(psm*ar),psm:Math.round(psm*100)/100,psf:Math.round((psm/S2F)*100)/100,contractDate:mo,year:y,marketSegment:p.seg,propertyType:p.ty,tenure:p.ten,typeOfSale:tos});}});
-return tx;
+import { getTransactions, getRentals } from './services/api';
+
+const COLORS = ['#0ea5e9','#6366f1','#8b5cf6','#f43f5e','#10b981','#f59e0b','#ec4899','#14b8a6','#ef4444','#3b82f6','#a855f7','#d946ef','#06b6d4','#84cc16','#fb923c','#64748b','#e11d48','#0d9488','#7c3aed','#ca8a04','#dc2626','#2563eb','#9333ea','#c026d3','#0891b2','#65a30d','#ea580c','#475569','#be123c','#0f766e'];
+
+const SEGMENT_COLORS_MAP = { CCR: '#ef4444', RCR: '#f59e0b', OCR: '#22c55e' };
+
+const CustomTooltip = ({ active, payload, label, prefix = '$', suffix = '' }) => {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{ background: 'rgba(15,23,42,0.95)', padding: '10px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 4px 20px rgba(0,0,0,0.3)' }}>
+      <p style={{ color: '#94a3b8', fontSize: 11, marginBottom: 6 }}>{label}</p>
+      {payload.map((p, i) => (
+        <p key={i} style={{ color: p.color || '#fff', fontSize: 12, margin: '2px 0' }}>
+          {p.name}: {prefix}{typeof p.value === 'number' ? p.value.toLocaleString(undefined, { maximumFractionDigits: 2 }) : p.value}{suffix}
+        </p>
+      ))}
+    </div>
+  );
 };
-const genRent = () => {
-const P=[{n:"MARINA ONE RESIDENCES",d:"01",s:"MARINA WAY"},{n:"THE SAIL @ MARINA BAY",d:"01",s:"MARINA BLVD"},{n:"RIVIERE",d:"03",s:"JIAK KIM"},{n:"AMBER PARK",d:"15",s:"AMBER GDNS"},{n:"PARC CLEMATIS",d:"05",s:"JALAN LEMPENG"},{n:"FLORENCE RESIDENCES",d:"19",s:"HOUGANG"}];
-const BR=["1","2","3","4","5"];const ARR={"1":["400-500","500-600"],"2":["700-800","800-900"],"3":["1000-1100","1100-1200"],"4":["1400-1500","1500-1700"],"5":["1800-2000","2000-2500"]};
-const BASE={"1":2800,"2":4200,"3":5500,"4":7500,"5":10000};const DM={"01":1.4,"03":1.25,"05":0.9,"07":1.2,"08":1.05,"09":1.5,"10":1.55,"14":0.85,"15":1.1,"18":0.75,"19":0.78,"20":0.88,"21":0.95,"22":0.82,"26":0.88};
-const r=[];
-for(let y=2022;y<=2025;y++){for(let q=1;q<=4;q++){if(y===2025&&q>2)break;const mm=String(q*3-Math.floor(Math.random()*3)).padStart(2,'0');const yy=String(y).slice(2);
-P.forEach(p=>{const n=2+Math.floor(Math.random()*4);for(let i=0;i<n;i++){const b=BR[Math.floor(Math.random()*BR.length)];const a=ARR[b];const asf=a[Math.floor(Math.random()*a.length)];const dm=DM[p.d]||1;const yf=1+(y-2022)*0.05+(Math.random()-0.5)*0.08;const rent=Math.round(BASE[b]*dm*yf*(0.9+Math.random()*0.2));r.push({project:p.n,street:p.s,district:p.d,propertyType:"Non-landed Properties",areaSqft:asf,rent,leaseDate:`${mm}${yy}`,noOfBedRoom:b,refPeriod:`${yy}q${q}`});}});}}
-return r;
-};
-const allTransactions=genTx();const allRentals=genRent();
-const Tip=({active,payload,label,prefix='$',suffix=''})=>{if(!active||!payload?.length)return null;return(<div style={{background:'#0f172af2',padding:'10px 14px',borderRadius:8,border:'1px solid #ffffff1a',boxShadow:'0 4px 20px #0004'}}><p style={{color:'#94a3b8',fontSize:11,marginBottom:6}}>{label}</p>{payload.map((p,i)=>(<p key={i} style={{color:p.color||'#fff',fontSize:12,margin:'2px 0'}}>{p.name}: {prefix}{typeof p.value==='number'?p.value.toLocaleString(undefined,{maximumFractionDigits:2}):p.value}{suffix}</p>))}</div>);};
-const Card=({children,style:s})=><div style={{background:'#ffffff0a',borderRadius:14,padding:20,border:'1px solid #ffffff10',...s}}>{children}</div>;
-const Stat=({label,value,color,icon,sub})=>(<div style={{background:'#ffffff0a',borderRadius:12,padding:'14px 16px',border:'1px solid #ffffff10'}}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}><span style={{color:'#64748b',fontSize:10,textTransform:'uppercase',letterSpacing:'0.5px'}}>{label}</span><span style={{fontSize:14}}>{icon}</span></div><div style={{color,fontSize:18,fontWeight:700,fontFamily:fm}}>{value}</div>{sub&&<div style={{color:'#475569',fontSize:10,marginTop:2}}>{sub}</div>}</div>);
-const $=v=>`$${v.toLocaleString(undefined,{maximumFractionDigits:2})}`;
-const $c=v=>{const a=Math.abs(v);const s=v<0?'-':'';if(a>=1e9)return`${s}$${(a/1e9).toFixed(2)}B`;if(a>=1e6)return`${s}$${(a/1e6).toFixed(1)}M`;if(a>=1e3)return`${s}$${(a/1e3).toFixed(0)}K`;return`${s}$${Math.round(a)}`;};
-const bs={background:'#ffffff10',border:'1px solid #ffffff1a',borderRadius:8,padding:'6px 12px',color:'#e2e8f0',fontSize:12,cursor:cp,outline:'none'};
-const h3s={color:'#e2e8f0',fontSize:14,fontWeight:600,marginBottom:16};
-const g2={display:'grid',gridTemplateColumns:'1fr 1fr',gap:16};
-const noDataS={display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:'#475569'};
-const pAM=a=>{if(!a)return 0;const p=a.split('-').map(s=>parseFloat(s.trim()));return(p.length===2&&p[0]>0&&p[1]>0)?(p[0]+p[1])/2:p[0]||0;};
-const pLQ=ld=>{if(!ld||ld.length!==4)return null;const mm=parseInt(ld.substring(0,2));const yy=parseInt(ld.substring(2,4));const year=yy>50?1900+yy:2000+yy;const q=Math.ceil(mm/3);return{label:`${year} Q${q}`,year,quarter:q,sortKey:year*10+q};};
-const getHC=(v,mn,mx)=>{if(mx===mn)return'#0ea5e94d';return`rgba(14,165,233,${0.1+((v-mn)/(mx-mn))*0.8})`;};
-const getHT=(v,mn,mx)=>((v-mn)/(mx-mn))>0.6?'#fff':'#cbd5e1';
-const getDC=(d,mn,mx)=>{if(d===0)return'#f1f5f94d';if(d>0)return`rgba(34,197,94,${0.1+Math.min(d/(mx||1),1)*0.6})`;return`rgba(239,68,68,${0.1+Math.min(Math.abs(d)/Math.abs(mn||1),1)*0.6})`;};
-const SortTh=({label,field,sortField,sortDir,onSort,align})=>(<th onClick={()=>onSort(field)} style={{color:'#94a3b8',fontWeight:500,padding:'10px 12px',textAlign:align||'left',cursor:cp,userSelect:'none',whiteSpace:'nowrap'}}>{label} {sortField===field?(sortDir==='asc'?'▲':'▼'):<span style={{opacity:0.3}}>⇅</span>}</th>);
-export default function Dashboard(){
-const[section,setSection]=useState('sales');
-const[salesTab,setSalesTab]=useState('overview');
-const[rentalTab,setRentalTab]=useState('overview');
-const[analyzeTab,setAnalyzeTab]=useState('trends');
-const[selectedDistricts,setSelectedDistricts]=useState([]);
-const[selectedYears,setSelectedYears]=useState([]);
-const[segmentFilter,setSegmentFilter]=useState('All');
-const[typeFilter,setTypeFilter]=useState('All');
-const[tenureFilter,setTenureFilter]=useState('All');
-const[projectFilter,setProjectFilter]=useState('All');
-const[projectSearch,setProjectSearch]=useState('');
-const[showProjectDD,setShowProjectDD]=useState(false);
-const[showDistrictPanel,setShowDistrictPanel]=useState(false);
-const[showYearPanel,setShowYearPanel]=useState(false);
-const[heatmapMetric,setHeatmapMetric]=useState('psf');
-const[showDiff,setShowDiff]=useState(false);
-const[rentalBedroom,setRentalBedroom]=useState('All');
-const[analyzeProject,setAnalyzeProject]=useState('');
-const[analyzeSearch,setAnalyzeSearch]=useState('');
-const[showAnalyzeDD,setShowAnalyzeDD]=useState(false);
-const[analyzeYears,setAnalyzeYears]=useState([]);
-const[showAnalyzeYearPanel,setShowAnalyzeYearPanel]=useState(false);
-const[pricingArea,setPricingArea]=useState('');
-const[pricingPsf,setPricingPsf]=useState('');
-const[pricingFloor,setPricingFloor]=useState('');
-const[saleSortField,setSaleSortField]=useState('contractDate');
-const[saleSortDir,setSaleSortDir]=useState('desc');
-const[rentSortField,setRentSortField]=useState('leaseDate');
-const[rentSortDir,setRentSortDir]=useState('desc');
-const[recordsView,setRecordsView]=useState('sales');
-const allYears=useMemo(()=>[...new Set(allTransactions.map(t=>t.year))].sort(),[]);
-const districts=useMemo(()=>[...new Set(allTransactions.map(t=>t.district))].sort(),[]);
-const segments=['All','CCR','RCR','OCR'];
-const types=useMemo(()=>['All',...new Set(allTransactions.map(t=>t.propertyType))],[]);
-const tenures=useMemo(()=>['All',...new Set(allTransactions.map(t=>t.tenure))],[]);
-const projects=useMemo(()=>['All',...new Set(allTransactions.map(t=>t.project))].sort(),[]);
-const allProjectNames=useMemo(()=>[...new Set([...allTransactions.map(t=>t.project),...allRentals.map(r=>r.project)])].sort(),[]);
-const filteredProjects=useMemo(()=>{if(!projectSearch.trim())return projects;const q=projectSearch.toLowerCase();return projects.filter(p=>p==='All'||p.toLowerCase().includes(q));},[projects,projectSearch]);
-const analyzeFilteredProjects=useMemo(()=>{if(!analyzeSearch.trim())return allProjectNames;return allProjectNames.filter(p=>p.toLowerCase().includes(analyzeSearch.toLowerCase()));},[allProjectNames,analyzeSearch]);
-const toggleD=d=>setSelectedDistricts(p=>p.includes(d)?p.filter(x=>x!==d):[...p,d]);
-const toggleY=y=>setSelectedYears(p=>p.includes(y)?p.filter(x=>x!==y):[...p,y]);
-const normTen=t=>{if(!t)return'Leasehold';const l=t.toLowerCase();return(l==='fh'||l==='freehold'||l.includes('freehold'))?'Freehold':'Leasehold';};
-const filtered=useMemo(()=>allTransactions.filter(t=>(selectedDistricts.length===0||selectedDistricts.includes(t.district))&&(selectedYears.length===0||selectedYears.includes(t.year))&&(segmentFilter==='All'||t.marketSegment===segmentFilter)&&(typeFilter==='All'||t.propertyType===typeFilter)&&(tenureFilter==='All'||t.tenure===tenureFilter)&&(projectFilter==='All'||t.project===projectFilter)),[selectedDistricts,selectedYears,segmentFilter,typeFilter,tenureFilter,projectFilter]);
-const yearLabel=useMemo(()=>{if(selectedYears.length===0)return`${allYears[0]}–${allYears[allYears.length-1]}`;const s=[...selectedYears].sort();return s.length===1?`${s[0]}`:`${s[0]}–${s[s.length-1]}`;},[selectedYears,allYears]);
-const latestYear=useMemo(()=>filtered.length?filtered.reduce((m,t)=>t.year>m?t.year:m,0):null,[filtered]);
-const filteredRentals=useMemo(()=>allRentals.filter(r=>(selectedDistricts.length===0||selectedDistricts.includes(r.district))&&(rentalBedroom==='All'||r.noOfBedRoom===rentalBedroom)),[allRentals,selectedDistricts,rentalBedroom]);
-const rentalBedrooms=useMemo(()=>['All',...new Set(allRentals.map(r=>r.noOfBedRoom).filter(Boolean))].sort(),[]);
-const stats=useMemo(()=>{if(!filtered.length)return{count:0,totalVol:0,avgPrice:0,avgPsf:0,medianPsf:0,minPsf:0,maxPsf:0};const p=filtered.map(t=>t.psf).sort((a,b)=>a-b);return{count:filtered.length,totalVol:filtered.reduce((s,t)=>s+t.priceNum,0),avgPrice:filtered.reduce((s,t)=>s+t.priceNum,0)/filtered.length,avgPsf:filtered.reduce((s,t)=>s+t.psf,0)/filtered.length,medianPsf:p[Math.floor(p.length/2)],minPsf:p[0],maxPsf:p[p.length-1]};},[filtered]);
-const yoyData=useMemo(()=>{const m={};filtered.forEach(t=>{if(!m[t.year])m[t.year]=[];m[t.year].push(t.psf);});const ys=Object.keys(m).sort();return ys.map((y,i)=>{const avg=m[y].reduce((s,v)=>s+v,0)/m[y].length;const prev=i>0?m[ys[i-1]].reduce((s,v)=>s+v,0)/m[ys[i-1]].length:null;return{year:y,avgPsf:Math.round(avg*100)/100,count:m[y].length,change:prev?Math.round(((avg-prev)/prev)*10000)/100:null};});},[filtered]);
-const segmentData=useMemo(()=>{const m={};filtered.forEach(t=>{if(!m[t.marketSegment])m[t.marketSegment]={psfs:[],count:0};m[t.marketSegment].psfs.push(t.psf);m[t.marketSegment].count++;});return Object.entries(m).map(([s,d])=>({name:s,avgPsf:Math.round((d.psfs.reduce((a,v)=>a+v,0)/d.psfs.length)*100)/100,count:d.count}));},[filtered]);
-const psfDist=useMemo(()=>{const b={};filtered.forEach(t=>{const k=Math.floor(t.psf/500)*500;b[k]=(b[k]||0)+1;});return Object.entries(b).sort(([a],[b])=>Number(a)-Number(b)).map(([k,c])=>({range:`$${Number(k).toLocaleString()}-${(Number(k)+499).toLocaleString()}`,count:c}));},[filtered]);
-const cumData=useMemo(()=>{const m={};filtered.forEach(t=>{m[t.contractDate]=(m[t.contractDate]||0)+t.priceNum;});let c=0;return Object.entries(m).sort(([a],[b])=>a.localeCompare(b)).map(([d,v])=>{c+=v;return{date:d,volume:v,cumulative:c};});},[filtered]);
-const typeData=useMemo(()=>{const m={};filtered.forEach(t=>{if(!m[t.propertyType])m[t.propertyType]={psfs:[],count:0};m[t.propertyType].psfs.push(t.psf);m[t.propertyType].count++;});return Object.entries(m).map(([t,d])=>({name:t,avgPsf:Math.round((d.psfs.reduce((s,v)=>s+v,0)/d.psfs.length)*100)/100,count:d.count}));},[filtered]);
-const tenureData=useMemo(()=>{const m={};filtered.forEach(t=>{const tn=normTen(t.tenure);if(!m[tn])m[tn]={psfs:[],count:0};m[tn].psfs.push(t.psf);m[tn].count++;});return Object.entries(m).map(([t,d])=>({name:t,avgPsf:Math.round((d.psfs.reduce((s,v)=>s+v,0)/d.psfs.length)*100)/100,count:d.count}));},[filtered]);
-const topProj=useMemo(()=>{const m={};filtered.forEach(t=>{if(!m[t.project])m[t.project]={count:0,totalVol:0,psfs:[]};m[t.project].count++;m[t.project].totalVol+=t.priceNum;m[t.project].psfs.push(t.psf);});return Object.entries(m).map(([n,d])=>({name:n.length>24?n.substring(0,24)+'…':n,count:d.count,volume:d.totalVol,avgPsf:Math.round((d.psfs.reduce((s,v)=>s+v,0)/d.psfs.length)*100)/100})).sort((a,b)=>b.count-a.count).slice(0,10);},[filtered]);
-const distTrend=useMemo(()=>{const m={};filtered.forEach(t=>{if(!m[t.contractDate])m[t.contractDate]={};if(!m[t.contractDate][t.district])m[t.contractDate][t.district]=[];m[t.contractDate][t.district].push(t.psf);});return Object.entries(m).sort(([a],[b])=>a.localeCompare(b)).map(([d,ds])=>{const r={date:d};Object.entries(ds).forEach(([k,v])=>{r[`D${k}`]=Math.round((v.reduce((s,x)=>s+x,0)/v.length)*100)/100;});return r;});},[filtered]);
-const activeDist=useMemo(()=>{const s=new Set();filtered.forEach(t=>s.add(t.district));return[...s].sort();},[filtered]);
-const distYoY=useMemo(()=>{const m={};filtered.forEach(t=>{const k=`${t.district}-${t.year}`;if(!m[k])m[k]={district:t.district,year:t.year,psfs:[]};m[k].psfs.push(t.psf);});const ym={};Object.values(m).forEach(d=>{if(!ym[d.year])ym[d.year]={};ym[d.year][`D${d.district}`]=Math.round((d.psfs.reduce((s,v)=>s+v,0)/d.psfs.length)*100)/100;});return Object.entries(ym).sort(([a],[b])=>a.localeCompare(b)).map(([y,d])=>({year:y,...d}));},[filtered]);
-const scatterData=useMemo(()=>['CCR','RCR','OCR'].map(seg=>({segment:seg,data:filtered.filter(t=>t.marketSegment===seg).slice(0,200).map(t=>({area:Math.round(t.areaSqft),psf:t.psf,price:t.priceNum,project:t.project}))})),[filtered]);
-const floorPrem=useMemo(()=>{const m={};filtered.forEach(t=>{if(!m[t.floorRange])m[t.floorRange]=[];m[t.floorRange].push(t.psf);});const fl=["01-05","06-10","11-15","16-20","21-25","26-30","31-35","36-40"];let prev=null;return fl.filter(f=>m[f]).map(f=>{const avg=m[f].reduce((s,v)=>s+v,0)/m[f].length;const pd=prev?avg-prev:0;const pp=prev?((avg-prev)/prev)*100:0;prev=avg;return{floor:f,avgPsf:Math.round(avg*100)/100,count:m[f].length,premDollar:Math.round(pd*100)/100,premPct:Math.round(pp*100)/100};});},[filtered]);
-const matrix=useMemo(()=>{const map=new Map();const fo=["01-05","06-10","11-15","16-20","21-25","26-30","31-35","36-40"];const ys=new Set();const fs=new Set();filtered.forEach(t=>{const k=`${t.floorRange}-${t.year}`;ys.add(t.year);fs.add(t.floorRange);if(!map.has(k))map.set(k,{totalPsf:0,totalPrice:0,count:0});const c=map.get(k);c.totalPsf+=t.psf;c.totalPrice+=t.priceNum;c.count++;});const cols=[...ys].sort();const rows=fo.filter(f=>fs.has(f));let mnP=Infinity,mxP=-Infinity,mnPr=Infinity,mxPr=-Infinity,mnV=Infinity,mxV=-Infinity;map.forEach(c=>{const a=c.totalPsf/c.count;const b=c.totalPrice/c.count;mnP=Math.min(mnP,a);mxP=Math.max(mxP,a);mnPr=Math.min(mnPr,b);mxPr=Math.max(mxPr,b);mnV=Math.min(mnV,c.count);mxV=Math.max(mxV,c.count);});const dm=new Map();let mdp=0,xdp=0,mdpr=0,xdpr=0,mdv=0,xdv=0;rows.forEach(f=>{cols.forEach((y,i)=>{const k=`${f}-${y}`;if(i===0){dm.set(k,{isBase:true});}else{const c=map.get(k);const p=map.get(`${f}-${cols[i-1]}`);if(c&&p){const dp=(c.totalPsf/c.count)-(p.totalPsf/p.count);const dpr=(c.totalPrice/c.count)-(p.totalPrice/p.count);const dv=c.count-p.count;dm.set(k,{isBase:false,diffPsf:dp,diffPrice:dpr,diffVol:dv});mdp=Math.min(mdp,dp);xdp=Math.max(xdp,dp);mdpr=Math.min(mdpr,dpr);xdpr=Math.max(xdpr,dpr);mdv=Math.min(mdv,dv);xdv=Math.max(xdv,dv);}else{dm.set(k,{isBase:false});}}});});return{map,dm,cols,rows,mnP,mxP,mnPr,mxPr,mnV,mxV,mdp,xdp,mdpr,xdpr,mdv,xdv};},[filtered]);
-const rStats=useMemo(()=>{if(!filteredRentals.length)return{count:0,avgRent:0,medianRent:0,avgRentPsf:0};const r=filteredRentals.map(x=>x.rent).sort((a,b)=>a-b);const rp=filteredRentals.map(x=>{const m=pAM(x.areaSqft);return m>0?x.rent/m:0;}).filter(v=>v>0);return{count:filteredRentals.length,avgRent:Math.round(r.reduce((s,v)=>s+v,0)/r.length),medianRent:r[Math.floor(r.length/2)],avgRentPsf:rp.length?Math.round((rp.reduce((s,v)=>s+v,0)/rp.length)*100)/100:0};},[filteredRentals]);
-const rTrend=useMemo(()=>{const m={};filteredRentals.forEach(r=>{const q=pLQ(r.leaseDate);if(!q)return;if(!m[q.sortKey])m[q.sortKey]={label:q.label,rents:[],sortKey:q.sortKey};m[q.sortKey].rents.push(r.rent);});return Object.values(m).sort((a,b)=>a.sortKey-b.sortKey).map(q=>({quarter:q.label,avgRent:Math.round(q.rents.reduce((s,v)=>s+v,0)/q.rents.length),count:q.rents.length}));},[filteredRentals]);
-const rByDist=useMemo(()=>{const m={};filteredRentals.forEach(r=>{if(!m[r.district])m[r.district]={rents:[],count:0};m[r.district].rents.push(r.rent);m[r.district].count++;});return Object.entries(m).sort(([a],[b])=>a.localeCompare(b)).map(([d,v])=>({district:`D${d}`,avgRent:Math.round(v.rents.reduce((s,r)=>s+r,0)/v.rents.length),count:v.count}));},[filteredRentals]);
-const rByBed=useMemo(()=>{const m={};filteredRentals.forEach(r=>{const b=r.noOfBedRoom||'N/A';if(!m[b])m[b]={rents:[],count:0};m[b].rents.push(r.rent);m[b].count++;});return Object.entries(m).sort(([a],[b])=>{if(a==='N/A')return 1;if(b==='N/A')return -1;return a.localeCompare(b);}).map(([b,v])=>({bedroom:b==='N/A'?'Unknown':`${b} BR`,avgRent:Math.round(v.rents.reduce((s,r)=>s+r,0)/v.rents.length),count:v.count}));},[filteredRentals]);
-const rPsfDist=useMemo(()=>{const m={};filteredRentals.forEach(r=>{const mid=pAM(r.areaSqft);if(mid<=0)return;if(!m[r.district])m[r.district]={psfs:[],count:0};m[r.district].psfs.push(r.rent/mid);m[r.district].count++;});return Object.entries(m).sort(([a],[b])=>a.localeCompare(b)).map(([d,v])=>({district:`D${d}`,rentPsf:Math.round((v.psfs.reduce((s,r)=>s+r,0)/v.psfs.length)*100)/100,count:v.count}));},[filteredRentals]);
-const rDistTrend=useMemo(()=>{const m={};filteredRentals.forEach(r=>{const q=pLQ(r.leaseDate);if(!q)return;if(!m[q.sortKey])m[q.sortKey]={label:q.label,sortKey:q.sortKey,districts:{}};if(!m[q.sortKey].districts[r.district])m[q.sortKey].districts[r.district]=[];m[q.sortKey].districts[r.district].push(r.rent);});return Object.values(m).sort((a,b)=>a.sortKey-b.sortKey).map(q=>{const row={quarter:q.label};Object.entries(q.districts).forEach(([d,rents])=>{row[`D${d}`]=Math.round(rents.reduce((s,v)=>s+v,0)/rents.length);});return row;});},[filteredRentals]);
-const activeRDist=useMemo(()=>{const s=new Set();filteredRentals.forEach(r=>s.add(r.district));return[...s].sort();},[filteredRentals]);
-const topRentProj=useMemo(()=>{const m={};filteredRentals.forEach(r=>{if(!m[r.project])m[r.project]={count:0,rents:[]};m[r.project].count++;m[r.project].rents.push(r.rent);});return Object.entries(m).map(([n,d])=>({name:n.length>24?n.substring(0,24)+'…':n,count:d.count,avgRent:Math.round(d.rents.reduce((s,v)=>s+v,0)/d.rents.length)})).sort((a,b)=>b.count-a.count).slice(0,10);},[filteredRentals]);
-const rByPropType=useMemo(()=>{const m={};filteredRentals.forEach(r=>{const t=r.propertyType||'Unknown';if(!m[t])m[t]={rents:[],count:0};m[t].rents.push(r.rent);m[t].count++;});return Object.entries(m).map(([t,v])=>({type:t,avgRent:Math.round(v.rents.reduce((s,r)=>s+r,0)/v.rents.length),count:v.count})).sort((a,b)=>b.count-a.count);},[filteredRentals]);
-const yieldData=useMemo(()=>{if(!filteredRentals.length||!filtered.length)return[];const rm={};filteredRentals.forEach(r=>{const mid=pAM(r.areaSqft);if(mid<=0)return;if(!rm[r.district])rm[r.district]=[];rm[r.district].push(r.rent/mid);});const bm={};filtered.forEach(t=>{if(!bm[t.district])bm[t.district]=[];bm[t.district].push(t.psf);});const res=[];Object.keys(rm).forEach(d=>{if(!bm[d])return;const ar=rm[d].reduce((s,v)=>s+v,0)/rm[d].length;const ab=bm[d].reduce((s,v)=>s+v,0)/bm[d].length;if(ab<=0)return;res.push({district:`D${d}`,rentPsf:Math.round(ar*100)/100,buyPsf:Math.round(ab),yield:Math.round((ar*12/ab)*10000)/100});});return res.sort((a,b)=>b.yield-a.yield);},[filteredRentals,filtered]);
-const projInfo=useMemo(()=>{if(!analyzeProject)return null;const tx=allTransactions.find(t=>t.project===analyzeProject);if(tx)return{district:tx.district,segment:tx.marketSegment,type:tx.propertyType,tenure:tx.tenure,street:tx.street};const rt=allRentals.find(r=>r.project===analyzeProject);if(rt)return{district:rt.district,segment:'',type:rt.propertyType,tenure:'',street:rt.street};return null;},[analyzeProject]);
-const projTxAll=useMemo(()=>analyzeProject?allTransactions.filter(t=>t.project===analyzeProject):[],[analyzeProject]);
-const projRentAll=useMemo(()=>analyzeProject?allRentals.filter(r=>r.project===analyzeProject):[],[analyzeProject]);
-const projAvailYears=useMemo(()=>{const s=new Set();projTxAll.forEach(t=>s.add(t.year));projRentAll.forEach(r=>{const q=pLQ(r.leaseDate);if(q)s.add(q.year);});return[...s].sort();},[projTxAll,projRentAll]);
-const analyzeYearLabel=useMemo(()=>{if(analyzeYears.length===0)return'All';const s=[...analyzeYears].sort();return s.length===1?`${s[0]}`:`${s.length} sel`;},[analyzeYears]);
-const toggleAY=y=>setAnalyzeYears(p=>p.includes(y)?p.filter(x=>x!==y):[...p,y]);
-const projTx=useMemo(()=>analyzeYears.length===0?projTxAll:projTxAll.filter(t=>analyzeYears.includes(t.year)),[projTxAll,analyzeYears]);
-const projRent=useMemo(()=>{if(analyzeYears.length===0)return projRentAll;return projRentAll.filter(r=>{const q=pLQ(r.leaseDate);return q&&analyzeYears.includes(q.year);});},[projRentAll,analyzeYears]);
-const projSaleStats=useMemo(()=>{if(!projTx.length)return null;const p=projTx.map(t=>t.psf).sort((a,b)=>a-b);return{count:projTx.length,avgPsf:Math.round((projTx.reduce((s,t)=>s+t.psf,0)/projTx.length)*100)/100,medianPsf:p[Math.floor(p.length/2)],minPsf:p[0],maxPsf:p[p.length-1],avgPrice:Math.round(projTx.reduce((s,t)=>s+t.priceNum,0)/projTx.length),totalVol:projTx.reduce((s,t)=>s+t.priceNum,0)};},[projTx]);
-const projRentStats=useMemo(()=>{if(!projRent.length)return null;const r=projRent.map(x=>x.rent).sort((a,b)=>a-b);const rp=projRent.map(x=>{const m=pAM(x.areaSqft);return m>0?x.rent/m:0;}).filter(v=>v>0);return{count:projRent.length,avgRent:Math.round(r.reduce((s,v)=>s+v,0)/r.length),medianRent:r[Math.floor(r.length/2)],avgRentPsf:rp.length?Math.round((rp.reduce((s,v)=>s+v,0)/rp.length)*100)/100:0};},[projRent]);
-const projYield=useMemo(()=>{if(!projSaleStats||!projRentStats||!projRentStats.avgRentPsf||!projSaleStats.avgPsf)return null;return Math.round((projRentStats.avgRentPsf*12/projSaleStats.avgPsf)*10000)/100;},[projSaleStats,projRentStats]);
-const projLatestSaleYear=useMemo(()=>projTx.length?projTx.reduce((m,t)=>t.year>m?t.year:m,0):null,[projTx]);
-const projLatestSaleStats=useMemo(()=>{if(!projLatestSaleYear)return null;const lt=projTx.filter(t=>t.year===projLatestSaleYear);if(!lt.length)return null;const p=lt.map(t=>t.psf).sort((a,b)=>a-b);return{year:projLatestSaleYear,count:lt.length,avgPsf:Math.round((lt.reduce((s,t)=>s+t.psf,0)/lt.length)*100)/100,minPsf:p[0],maxPsf:p[p.length-1]};},[projTx,projLatestSaleYear]);
-const projLatestRentYear=useMemo(()=>{if(!projRent.length)return null;let my=0;projRent.forEach(r=>{const q=pLQ(r.leaseDate);if(q&&q.year>my)my=q.year;});return my||null;},[projRent]);
-const projLatestRentStats=useMemo(()=>{if(!projLatestRentYear)return null;const lr=projRent.filter(r=>{const q=pLQ(r.leaseDate);return q&&q.year===projLatestRentYear;});if(!lr.length)return null;const rp=lr.map(x=>{const m=pAM(x.areaSqft);return m>0?x.rent/m:0;}).filter(v=>v>0);return{year:projLatestRentYear,count:lr.length,avgRent:Math.round(lr.reduce((s,r)=>s+r.rent,0)/lr.length),avgRentPsf:rp.length?Math.round((rp.reduce((s,v)=>s+v,0)/rp.length)*100)/100:0};},[projRent,projLatestRentYear]);
-const projLatestYield=useMemo(()=>{const ly=Math.max(projLatestSaleYear||0,projLatestRentYear||0);if(!ly)return null;const sly=projTx.filter(t=>t.year===ly);const rly=projRent.filter(r=>{const q=pLQ(r.leaseDate);return q&&q.year===ly;});if(!sly.length||!rly.length)return null;const avgBuy=sly.reduce((s,t)=>s+t.psf,0)/sly.length;const rps=rly.map(x=>{const m=pAM(x.areaSqft);return m>0?x.rent/m:0;}).filter(v=>v>0);if(!rps.length||avgBuy<=0)return null;const avgRp=rps.reduce((s,v)=>s+v,0)/rps.length;return{year:ly,yield:Math.round((avgRp*12/avgBuy)*10000)/100,buyPsf:Math.round(avgBuy*100)/100,rentPsf:Math.round(avgRp*100)/100};},[projTx,projRent,projLatestSaleYear,projLatestRentYear]);
-const projFloorDetail=useMemo(()=>{const m={};projTx.forEach(t=>{if(!m[t.floorRange])m[t.floorRange]={all:[],latest:[]};m[t.floorRange].all.push(t);if(t.year===projLatestSaleYear)m[t.floorRange].latest.push(t);});const fl=["01-05","06-10","11-15","16-20","21-25","26-30","31-35","36-40"];return fl.filter(f=>m[f]).map(f=>{const a=m[f].all;const l=m[f].latest;const ap=a.map(t=>t.psf);const lp=l.map(t=>t.psf);return{floor:f,allAvgPsf:Math.round((ap.reduce((s,v)=>s+v,0)/ap.length)*100)/100,allMinPsf:Math.min(...ap),allMaxPsf:Math.max(...ap),allCount:ap.length,latestAvgPsf:lp.length?Math.round((lp.reduce((s,v)=>s+v,0)/lp.length)*100)/100:null,latestMinPsf:lp.length?Math.min(...lp):null,latestMaxPsf:lp.length?Math.max(...lp):null,latestCount:lp.length,areas:a.map(t=>t.areaSqft)};});},[projTx,projLatestSaleYear]);
-const projAreas=useMemo(()=>[...new Set(projTx.map(t=>t.areaSqft))].sort((a,b)=>a-b),[projTx]);
-const projPsfTrend=useMemo(()=>{const m={};projTx.forEach(t=>{if(!m[t.contractDate])m[t.contractDate]=[];m[t.contractDate].push(t.psf);});return Object.entries(m).sort(([a],[b])=>a.localeCompare(b)).map(([d,ps])=>({date:d,avgPsf:Math.round((ps.reduce((s,v)=>s+v,0)/ps.length)*100)/100,count:ps.length}));},[projTx]);
-const projRentTrend=useMemo(()=>{const m={};projRent.forEach(r=>{const q=pLQ(r.leaseDate);if(!q)return;if(!m[q.sortKey])m[q.sortKey]={label:q.label,rents:[],sortKey:q.sortKey};m[q.sortKey].rents.push(r.rent);});return Object.values(m).sort((a,b)=>a.sortKey-b.sortKey).map(q=>({quarter:q.label,avgRent:Math.round(q.rents.reduce((s,v)=>s+v,0)/q.rents.length),count:q.rents.length}));},[projRent]);
-const projFloor=useMemo(()=>{const m={};projTx.forEach(t=>{if(!m[t.floorRange])m[t.floorRange]=[];m[t.floorRange].push(t.psf);});const fl=["01-05","06-10","11-15","16-20","21-25","26-30","31-35","36-40"];let prev=null;return fl.filter(f=>m[f]).map(f=>{const avg=m[f].reduce((s,v)=>s+v,0)/m[f].length;const pd=prev?avg-prev:0;const pp=prev?((avg-prev)/prev)*100:0;prev=avg;return{floor:f,avgPsf:Math.round(avg*100)/100,count:m[f].length,premDollar:Math.round(pd*100)/100,premPct:Math.round(pp*100)/100};});},[projTx]);
-const projScatter=useMemo(()=>projTx.map(t=>({area:t.areaSqft,psf:t.psf,price:t.priceNum,floor:t.floorRange,date:t.contractDate})),[projTx]);
-const projComparison=useMemo(()=>{if(!projInfo||!projTx.length)return[];const dist=projInfo.district;const seg=projInfo.segment;const m={};allTransactions.forEach(t=>{if(!m[t.contractDate])m[t.contractDate]={proj:[],dist:[],seg:[]};if(t.project===analyzeProject)m[t.contractDate].proj.push(t.psf);if(t.district===dist)m[t.contractDate].dist.push(t.psf);if(t.marketSegment===seg)m[t.contractDate].seg.push(t.psf);});return Object.entries(m).sort(([a],[b])=>a.localeCompare(b)).map(([d,v])=>({date:d,project:v.proj.length?Math.round((v.proj.reduce((s,x)=>s+x,0)/v.proj.length)*100)/100:null,district:v.dist.length?Math.round((v.dist.reduce((s,x)=>s+x,0)/v.dist.length)*100)/100:null,segment:v.seg.length?Math.round((v.seg.reduce((s,x)=>s+x,0)/v.seg.length)*100)/100:null}));},[projInfo,projTx,analyzeProject]);
-const nearbyProjects=useMemo(()=>{if(!projInfo)return[];const m={};allTransactions.filter(t=>t.district===projInfo.district&&t.project!==analyzeProject).forEach(t=>{if(!m[t.project])m[t.project]={count:0,psfs:[]};m[t.project].count++;m[t.project].psfs.push(t.psf);});return Object.entries(m).map(([n,d])=>({name:n,count:d.count,avgPsf:Math.round((d.psfs.reduce((s,v)=>s+v,0)/d.psfs.length)*100)/100})).sort((a,b)=>b.count-a.count).slice(0,8);},[projInfo,analyzeProject]);
-const projRentByBed=useMemo(()=>{const m={};projRent.forEach(r=>{const b=r.noOfBedRoom||'N/A';if(!m[b])m[b]={rents:[],count:0};m[b].rents.push(r.rent);m[b].count++;});return Object.entries(m).sort(([a],[b])=>{if(a==='N/A')return 1;if(b==='N/A')return -1;return a.localeCompare(b);}).map(([b,v])=>({bedroom:b==='N/A'?'Unknown':`${b} BR`,avgRent:Math.round(v.rents.reduce((s,r)=>s+r,0)/v.rents.length),count:v.count}));},[projRent]);
-const sortedProjTx=useMemo(()=>{const d=saleSortDir==='asc'?1:-1;return[...projTx].sort((a,b)=>{const f=saleSortField;if(f==='contractDate')return a.contractDate.localeCompare(b.contractDate)*d;if(typeof a[f]==='number')return(a[f]-b[f])*d;return String(a[f]||'').localeCompare(String(b[f]||''))*d;});},[projTx,saleSortField,saleSortDir]);
-const sortedProjRent=useMemo(()=>{const d=rentSortDir==='asc'?1:-1;return[...projRent].sort((a,b)=>{const f=rentSortField;if(f==='leaseDate'){const qa=pLQ(a.leaseDate);const qb=pLQ(b.leaseDate);return((qa?.sortKey||0)-(qb?.sortKey||0))*d;}if(f==='rent')return(a.rent-b.rent)*d;if(f==='areaMid'){return(pAM(a.areaSqft)-pAM(b.areaSqft))*d;}return String(a[f]||'').localeCompare(String(b[f]||''))*d;});},[projRent,rentSortField,rentSortDir]);
-const toggleSaleSort=f=>{if(saleSortField===f)setSaleSortDir(d=>d==='asc'?'desc':'asc');else{setSaleSortField(f);setSaleSortDir('desc');}};
-const toggleRentSort=f=>{if(rentSortField===f)setRentSortDir(d=>d==='asc'?'desc':'asc');else{setRentSortField(f);setRentSortDir('desc');}};
-const salesTabs=[{id:'overview',label:'📊 Overview'},{id:'districts',label:'📍 Districts'},{id:'advanced',label:'📈 Advanced'},{id:'floor',label:'🏢 Floor'}];
-const rentalTabs=[{id:'overview',label:'📊 Overview'},{id:'districts',label:'📍 Districts'},{id:'projects',label:'🏆 Top Projects'},{id:'yield',label:'💰 Yield'}];
-const analyzeTabs=[{id:'trends',label:'📈 Trends'},{id:'pricing',label:'💲 Pricing'},{id:'floor',label:'🏢 Floor'},{id:'compare',label:'📊 Compare'},{id:'yield',label:'💰 Yield'},{id:'records',label:'📋 Records'}];
-const activeTab=section==='sales'?salesTab:section==='rental'?rentalTab:analyzeTab;
-const setTab=section==='sales'?setSalesTab:section==='rental'?setRentalTab:setAnalyzeTab;
-const tabList=section==='sales'?salesTabs:section==='rental'?rentalTabs:analyzeTabs;
-const sectionColor=section==='sales'?'#38bdf8':section==='rental'?'#34d399':'#a78bfa';
-const thStyle={color:'#94a3b8',fontWeight:500,padding:'10px 12px',textAlign:'left',fontSize:12};
-const tdStyle={padding:'10px 12px',fontSize:12};
-return(
-<div style={{minHeight:'100vh',background:'linear-gradient(135deg,#0f172a 0%,#1e293b 50%,#0f172a 100%)',fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
-{}
-<div style={{padding:'20px 28px 0'}}>
-<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-<div><h1 style={{color:'#f1f5f9',fontSize:24,fontWeight:700,margin:0}}><span style={{color:'#38bdf8'}}>URA</span> Property Analytics</h1><p style={{color:'#64748b',fontSize:12,marginTop:2}}>{allTransactions.length.toLocaleString()} sales · {allRentals.length.toLocaleString()} rentals · Singapore</p></div>
-<div style={{display:'flex',gap:8,alignItems:'center'}}><span style={{background:'#22c55e',width:8,height:8,borderRadius:'50%',display:'inline-block'}}/><span style={{color:'#94a3b8',fontSize:12}}>Preview</span></div>
-</div>
-{}
-<div style={{display:'flex',gap:0,marginBottom:16,background:'#ffffff0a',borderRadius:12,padding:4,width:'fit-content',border:'1px solid #ffffff10'}}>
-{[{id:'sales',label:'💰 Sales',c:'#38bdf8'},{id:'rental',label:'🏠 Rental',c:'#34d399'},{id:'analyze',label:'🔍 Analysis',c:'#a78bfa'}].map(s=>(<button key={s.id} onClick={()=>setSection(s.id)} style={{background:section===s.id?`${s.c}18`:'transparent',border:section===s.id?`1px solid ${s.c}4D`:'1px solid transparent',borderRadius:10,padding:'10px 24px',color:section===s.id?s.c:'#64748b',fontSize:13,fontWeight:600,cursor:cp,transition:'all 0.2s'}}>{s.label}</button>))}
-</div>
-{(showDistrictPanel||showProjectDD||showYearPanel||showAnalyzeDD||showAnalyzeYearPanel)&&<div onClick={()=>{setShowDistrictPanel(false);setShowProjectDD(false);setShowYearPanel(false);setShowAnalyzeDD(false);setShowAnalyzeYearPanel(false);}} style={{position:'fixed',top:0,left:0,right:0,bottom:0,zIndex:40}}/>}
-{}
-{section!=='analyze'&&(<div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-start',position:'relative',zIndex:45}}>
-<div style={{position:'relative'}}><button onClick={()=>{setShowDistrictPanel(!showDistrictPanel);setShowProjectDD(false);setShowYearPanel(false);}} style={{...bs,minWidth:140,textAlign:'left',display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}><span>District: {selectedDistricts.length===0?'All':selectedDistricts.length===1?`D${selectedDistricts[0]}`:`${selectedDistricts.length} sel`}</span><span style={{fontSize:10,opacity:0.6}}>▼</span></button>{showDistrictPanel&&(<div style={{position:'absolute',top:'100%',left:0,marginTop:4,background:'#1e293b',border:'1px solid #ffffff1f',borderRadius:10,padding:12,zIndex:50,width:280,maxHeight:320,overflowY:'auto',boxShadow:'0 12px 40px #00000080'}}><div style={{display:'flex',justifyContent:'space-between',marginBottom:8,paddingBottom:8,borderBottom:'1px solid #ffffff14'}}><span style={{color:'#94a3b8',fontSize:11,fontWeight:600,textTransform:'uppercase'}}>Districts</span><div style={{display:'flex',gap:6}}><button onClick={()=>setSelectedDistricts([...districts])} style={{background:'#38bdf826',border:'1px solid #38bdf84d',borderRadius:5,padding:'2px 8px',color:'#38bdf8',fontSize:10,cursor:cp}}>All</button><button onClick={()=>setSelectedDistricts([])} style={{background:'#ffffff10',border:'1px solid #ffffff1a',borderRadius:5,padding:'2px 8px',color:'#94a3b8',fontSize:10,cursor:cp}}>Clear</button></div></div><div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:2}}>{districts.map(d=><label key={d} onClick={()=>toggleD(d)} style={{display:'flex',alignItems:'center',gap:8,padding:'5px 6px',borderRadius:6,cursor:cp,background:selectedDistricts.includes(d)?'#38bdf814':'transparent'}}><div style={{width:16,height:16,borderRadius:4,border:selectedDistricts.includes(d)?'2px solid #38bdf8':'2px solid #fff3',background:selectedDistricts.includes(d)?'#38bdf8':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>{selectedDistricts.includes(d)&&<span style={{color:'#0f172a',fontSize:10,fontWeight:700}}>✓</span>}</div><span style={{color:selectedDistricts.includes(d)?'#e2e8f0':'#94a3b8',fontSize:12}}>D{d}</span></label>)}</div><button onClick={()=>setShowDistrictPanel(false)} style={{width:'100%',marginTop:10,padding:'6px 0',background:'#38bdf826',border:'1px solid #38bdf84d',borderRadius:6,color:'#38bdf8',fontSize:11,fontWeight:600,cursor:cp}}>Done</button></div>)}</div>
-<div style={{position:'relative'}}><button onClick={()=>{setShowYearPanel(!showYearPanel);setShowDistrictPanel(false);setShowProjectDD(false);}} style={{...bs,minWidth:130,textAlign:'left',display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}><span>Year: {selectedYears.length===0?'All':selectedYears.length===1?selectedYears[0]:`${selectedYears.length} sel`}</span><span style={{fontSize:10,opacity:0.6}}>▼</span></button>{showYearPanel&&(<div style={{position:'absolute',top:'100%',left:0,marginTop:4,background:'#1e293b',border:'1px solid #ffffff1f',borderRadius:10,padding:12,zIndex:50,width:200,boxShadow:'0 12px 40px #00000080'}}><div style={{display:'flex',justifyContent:'space-between',marginBottom:8,paddingBottom:8,borderBottom:'1px solid #ffffff14'}}><span style={{color:'#94a3b8',fontSize:11,fontWeight:600,textTransform:'uppercase'}}>Years</span><div style={{display:'flex',gap:6}}><button onClick={()=>setSelectedYears([...allYears])} style={{background:'#38bdf826',border:'1px solid #38bdf84d',borderRadius:5,padding:'2px 8px',color:'#38bdf8',fontSize:10,cursor:cp}}>All</button><button onClick={()=>setSelectedYears([])} style={{background:'#ffffff10',border:'1px solid #ffffff1a',borderRadius:5,padding:'2px 8px',color:'#94a3b8',fontSize:10,cursor:cp}}>Clear</button></div></div>{allYears.map(y=><label key={y} onClick={()=>toggleY(y)} style={{display:'flex',alignItems:'center',gap:8,padding:'5px 6px',borderRadius:6,cursor:cp,background:selectedYears.includes(y)?'#38bdf814':'transparent'}}><div style={{width:16,height:16,borderRadius:4,border:selectedYears.includes(y)?'2px solid #38bdf8':'2px solid #fff3',background:selectedYears.includes(y)?'#38bdf8':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>{selectedYears.includes(y)&&<span style={{color:'#0f172a',fontSize:10,fontWeight:700}}>✓</span>}</div><span style={{color:selectedYears.includes(y)?'#e2e8f0':'#94a3b8',fontSize:12}}>{y}</span></label>)}<button onClick={()=>setShowYearPanel(false)} style={{width:'100%',marginTop:10,padding:'6px 0',background:'#38bdf826',border:'1px solid #38bdf84d',borderRadius:6,color:'#38bdf8',fontSize:11,fontWeight:600,cursor:cp}}>Done</button></div>)}</div>
-{section==='sales'&&<div style={{display:"contents"}}>{[{label:'Segment',value:segmentFilter,set:setSegmentFilter,opts:segments},{label:'Type',value:typeFilter,set:setTypeFilter,opts:types},{label:'Tenure',value:tenureFilter,set:setTenureFilter,opts:tenures}].map(f=><select key={f.label} value={f.value} onChange={e=>f.set(e.target.value)} style={{...bs,minWidth:100}}>{f.opts.map(o=><option key={o} value={o}>{f.label}: {o}</option>)}</select>)}<div style={{position:'relative',minWidth:220}}><div onClick={()=>{setShowProjectDD(!showProjectDD);setShowDistrictPanel(false);setShowYearPanel(false);}} style={{...bs,padding:'0 4px',display:'flex',alignItems:'center'}}><span style={{color:'#64748b',fontSize:12,padding:'6px 8px'}}>🔍</span><input type="text" placeholder={projectFilter==='All'?`Project: All (${projects.length-1})`:projectFilter} value={projectSearch} onChange={e=>{setProjectSearch(e.target.value);setShowProjectDD(true);}} onFocus={()=>{setShowProjectDD(true);setShowDistrictPanel(false);setShowYearPanel(false);}} style={{background:'transparent',border:'none',outline:'none',color:'#e2e8f0',fontSize:12,padding:'6px 4px',flex:1,width:'100%',minWidth:0}}/>{projectFilter!=='All'&&<button onClick={e=>{e.stopPropagation();setProjectFilter('All');setProjectSearch('');}} style={{background:'#ffffff1a',border:'none',borderRadius:4,color:'#94a3b8',fontSize:10,padding:'2px 6px',cursor:cp,marginRight:4}}>✕</button>}</div>{showProjectDD&&<div style={{position:'absolute',top:'100%',left:0,right:0,marginTop:4,background:'#1e293b',border:'1px solid #ffffff1f',borderRadius:10,zIndex:50,maxHeight:280,overflowY:'auto',boxShadow:'0 12px 40px #00000080'}}>{filteredProjects.slice(0,50).map(p=><div key={p} onClick={()=>{setProjectFilter(p);setProjectSearch('');setShowProjectDD(false);}} style={{padding:'8px 14px',fontSize:12,cursor:cp,color:p===projectFilter?'#38bdf8':'#cbd5e1',borderBottom:'1px solid #ffffff0a'}} onMouseEnter={e=>e.currentTarget.style.background='#ffffff10'} onMouseLeave={e=>e.currentTarget.style.background='transparent'}>{p==='All'?`All Projects (${projects.length-1})`:p}</div>)}</div>}</div></div>}
-{section==='rental'&&<select value={rentalBedroom} onChange={e=>setRentalBedroom(e.target.value)} style={{...bs,minWidth:130}}>{rentalBedrooms.map(b=><option key={b} value={b}>Bedrooms: {b}</option>)}</select>}
-</div>)}
-{}
-{section==='analyze'&&(<div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'flex-start',position:'relative',zIndex:45}}>
-<div style={{position:'relative',minWidth:320,flex:'1 1 320px',maxWidth:500}}>
-<div style={{...bs,padding:'0 4px',display:'flex',alignItems:'center',background:'#a78bfa14',border:'1px solid #a78bfa33',borderRadius:12}}><span style={{color:'#a78bfa',fontSize:16,padding:'10px 12px'}}>🔍</span><input type="text" placeholder="Search for a project to analyze..." value={analyzeSearch} onChange={e=>{setAnalyzeSearch(e.target.value);setShowAnalyzeDD(true);}} onFocus={()=>setShowAnalyzeDD(true)} style={{background:'transparent',border:'none',outline:'none',color:'#e2e8f0',fontSize:14,padding:'10px 4px',flex:1,width:'100%',minWidth:0}}/>{analyzeProject&&<button onClick={()=>{setAnalyzeProject('');setAnalyzeSearch('');setAnalyzeYears([]);setPricingArea('');setPricingPsf('');setPricingFloor('');}} style={{background:'#ffffff1a',border:'none',borderRadius:6,color:'#94a3b8',fontSize:11,padding:'4px 10px',cursor:cp,marginRight:6}}>✕ Clear</button>}</div>
-{showAnalyzeDD&&analyzeSearch.trim()&&(<div style={{position:'absolute',top:'100%',left:0,right:0,marginTop:4,background:'#1e293b',border:'1px solid #ffffff1f',borderRadius:10,zIndex:50,maxHeight:320,overflowY:'auto',boxShadow:'0 12px 40px #00000080'}}>{analyzeFilteredProjects.length===0?<div style={{padding:16,color:'#64748b',fontSize:12,textAlign:'center'}}>No projects found</div>:analyzeFilteredProjects.slice(0,30).map(p=><div key={p} onClick={()=>{setAnalyzeProject(p);setAnalyzeSearch(p);setShowAnalyzeDD(false);setAnalyzeYears([]);setPricingArea('');setPricingPsf('');setPricingFloor('');}} style={{padding:'10px 16px',fontSize:13,cursor:cp,color:p===analyzeProject?'#a78bfa':'#cbd5e1',borderBottom:'1px solid #ffffff0a'}} onMouseEnter={e=>e.currentTarget.style.background='#ffffff10'} onMouseLeave={e=>e.currentTarget.style.background='transparent'}>{p}</div>)}</div>)}
-</div>
-{analyzeProject&&projAvailYears.length>0&&(<div style={{position:'relative'}}>
-<button onClick={()=>{setShowAnalyzeYearPanel(!showAnalyzeYearPanel);setShowAnalyzeDD(false);}} style={{...bs,minWidth:140,textAlign:'left',display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,padding:'10px 14px',background:'#a78bfa0f',border:'1px solid #a78bfa26',borderRadius:10}}><span style={{color:analyzeYears.length>0?'#a78bfa':'#94a3b8'}}>📅 Year: {analyzeYearLabel}</span><span style={{fontSize:10,opacity:0.6}}>▼</span></button>
-{showAnalyzeYearPanel&&(<div style={{position:'absolute',top:'100%',left:0,marginTop:4,background:'#1e293b',border:'1px solid #ffffff1f',borderRadius:10,padding:12,zIndex:50,width:200,boxShadow:'0 12px 40px #00000080'}}>
-<div style={{display:'flex',justifyContent:'space-between',marginBottom:8,paddingBottom:8,borderBottom:'1px solid #ffffff14'}}><span style={{color:'#94a3b8',fontSize:11,fontWeight:600,textTransform:'uppercase'}}>Years</span><div style={{display:'flex',gap:6}}><button onClick={()=>setAnalyzeYears([...projAvailYears])} style={{background:'#a78bfa26',border:'1px solid #a78bfa4d',borderRadius:5,padding:'2px 8px',color:'#a78bfa',fontSize:10,cursor:cp}}>All</button><button onClick={()=>setAnalyzeYears([])} style={{background:'#ffffff10',border:'1px solid #ffffff1a',borderRadius:5,padding:'2px 8px',color:'#94a3b8',fontSize:10,cursor:cp}}>Clear</button></div></div>
-{projAvailYears.map(y=><label key={y} onClick={()=>toggleAY(y)} style={{display:'flex',alignItems:'center',gap:8,padding:'5px 6px',borderRadius:6,cursor:cp,background:analyzeYears.includes(y)?'#a78bfa14':'transparent'}}><div style={{width:16,height:16,borderRadius:4,border:analyzeYears.includes(y)?'2px solid #a78bfa':'2px solid #fff3',background:analyzeYears.includes(y)?'#a78bfa':'transparent',display:'flex',alignItems:'center',justifyContent:'center'}}>{analyzeYears.includes(y)&&<span style={{color:'#0f172a',fontSize:10,fontWeight:700}}>✓</span>}</div><span style={{color:analyzeYears.includes(y)?'#e2e8f0':'#94a3b8',fontSize:12}}>{y}</span></label>)}
-<button onClick={()=>setShowAnalyzeYearPanel(false)} style={{width:'100%',marginTop:10,padding:'6px 0',background:'#a78bfa26',border:'1px solid #a78bfa4d',borderRadius:6,color:'#a78bfa',fontSize:11,fontWeight:600,cursor:cp}}>Done</button>
-</div>)}
-</div>)}
-{analyzeYears.length>0&&<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap',alignSelf:'center'}}><span style={{color:'#64748b',fontSize:11}}>Filtered:</span>{[...analyzeYears].sort((a,b)=>a-b).map(y=><span key={y} style={{background:'#a78bfa1f',border:'1px solid #a78bfa40',borderRadius:6,padding:'2px 8px',fontSize:11,color:'#a78bfa',display:'flex',alignItems:'center',gap:4}}>{y}<span onClick={()=>toggleAY(y)} style={{cursor:cp,opacity:0.7,fontSize:10}}>✕</span></span>)}<button onClick={()=>setAnalyzeYears([])} style={{background:'none',border:'none',color:'#64748b',fontSize:11,cursor:cp,textDecoration:'underline'}}>Clear</button></div>}
-</div>)}
-{}
-{section!=='analyze'&&(selectedDistricts.length>0||selectedYears.length>0)&&<div style={{display:'flex',gap:6,marginTop:10,flexWrap:'wrap',alignItems:'center'}}><span style={{color:'#64748b',fontSize:11,marginRight:4}}>Filtered:</span>{[...selectedYears].sort((a,b)=>a-b).map(y=><span key={`y-${y}`} style={{background:'#34d3991f',border:'1px solid #34d39940',borderRadius:6,padding:'2px 8px',fontSize:11,color:'#34d399',display:'flex',alignItems:'center',gap:4}}>{y}<span onClick={()=>toggleY(y)} style={{cursor:cp,opacity:0.7,fontSize:10}}>✕</span></span>)}{[...selectedDistricts].sort().map(d=><span key={`d-${d}`} style={{background:'#38bdf81f',border:'1px solid #38bdf840',borderRadius:6,padding:'2px 8px',fontSize:11,color:'#38bdf8',display:'flex',alignItems:'center',gap:4}}>D{d}<span onClick={()=>toggleD(d)} style={{cursor:cp,opacity:0.7,fontSize:10}}>✕</span></span>)}<button onClick={()=>{setSelectedDistricts([]);setSelectedYears([]);}} style={{background:'none',border:'none',color:'#64748b',fontSize:11,cursor:cp,textDecoration:'underline'}}>Clear all</button></div>}
-{}
-{(section!=='analyze'||analyzeProject)&&(<div style={{display:'flex',gap:4,marginTop:14,paddingBottom:16,borderBottom:'1px solid #ffffff10'}}>{tabList.map(t=><button key={t.id} onClick={()=>setTab(t.id)} style={{background:activeTab===t.id?`${sectionColor}18`:'transparent',border:activeTab===t.id?`1px solid ${sectionColor}4D`:'1px solid transparent',borderRadius:8,padding:'8px 16px',color:activeTab===t.id?sectionColor:'#64748b',fontSize:13,fontWeight:500,cursor:cp}}>{t.label}</button>)}</div>)}
-</div>
-{}
-{section!=='analyze'&&<div style={{padding:'14px 28px 4px'}}><div style={{display:'flex',justifyContent:'space-between'}}><span style={{color:'#64748b',fontSize:11}}>{section==='sales'?'Sales':'Rental'} · <span style={{color:'#e2e8f0',fontWeight:600}}>{yearLabel}</span></span><span style={{color:'#475569',fontSize:11}}>{section==='sales'?`${filtered.length.toLocaleString()} transactions`:`${filteredRentals.length.toLocaleString()} contracts`}</span></div></div>}
-{}
-{section!=='analyze'&&<div style={{padding:'12px 28px 16px',display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:10}}>{section==='sales'?<div style={{display:"contents"}}><Stat label="Transactions" value={stats.count.toLocaleString()} color="#38bdf8" icon="📋"/><Stat label="Total Volume" value={$c(stats.totalVol)} color="#a78bfa" icon="💰"/><Stat label="Avg Price" value={$(Math.round(stats.avgPrice))} color="#34d399" icon="🏷️"/><Stat label="Avg PSF" value={$(stats.avgPsf)} color="#fb923c" icon="📐"/><Stat label="Med PSF" value={$(stats.medianPsf)} color="#f472b6" icon="📊"/><Stat label="PSF Range" value={`${$(stats.minPsf)} – ${$(stats.maxPsf)}`} color="#94a3b8" icon="↕️"/></div>:<div style={{display:"contents"}}><Stat label="Contracts" value={rStats.count.toLocaleString()} color="#34d399" icon="📋"/><Stat label="Avg Rent" value={`$${rStats.avgRent.toLocaleString()}/mo`} color="#38bdf8" icon="💵"/><Stat label="Med Rent" value={`$${rStats.medianRent.toLocaleString()}/mo`} color="#f472b6" icon="📊"/><Stat label="Avg Rent PSF" value={`$${rStats.avgRentPsf}/mo`} color="#fb923c" icon="📐"/></div>}</div>}
-{}
-{section==='sales'&&<div style={{padding:'0 28px 28px'}}>
-{salesTab==='overview'&&(<div style={g2}>
-<Card><h3 style={h3s}>YoY PSF</h3><div style={{height:280}}><ResponsiveContainer width="100%" height="100%"><ComposedChart data={yoyData}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="year" tick={{fill:'#64748b',fontSize:11}} axisLine={false}/><YAxis yAxisId="left" tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><YAxis yAxisId="right" orientation="right" tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>`${v}%`}/><Tooltip content={<Tip/>}/><Legend wrapperStyle={{fontSize:11}}/><Bar yAxisId="left" dataKey="avgPsf" name="Avg PSF" fill="#6366f1" radius={[4,4,0,0]} barSize={32}/><Line yAxisId="right" dataKey="change" name="YoY %" stroke="#f59e0b" strokeWidth={2} dot={{r:4,fill:'#f59e0b'}} connectNulls/><ReferenceLine yAxisId="right" y={0} stroke="#ffffff26"/></ComposedChart></ResponsiveContainer></div></Card>
-<Card><h3 style={h3s}>🎯 Market Segment</h3><div style={{height:280,display:'flex',gap:16}}><div style={{flex:1}}><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={segmentData} dataKey="count" nameKey="name" cx="50%" cy="50%" outerRadius={90} innerRadius={50} paddingAngle={3}>{segmentData.map((e,i)=><Cell key={i} fill={SC[e.name]||COLORS[i]}/>)}</Pie><Tooltip content={<Tip prefix=""/>}/><Legend wrapperStyle={{fontSize:11}}/></PieChart></ResponsiveContainer></div><div style={{display:'flex',flexDirection:'column',justifyContent:'center',gap:12}}>{segmentData.map((s,i)=><div key={s.name} style={{display:'flex',alignItems:'center',gap:10}}><div style={{width:10,height:10,borderRadius:3,background:SC[s.name]||COLORS[i]}}/><div><div style={{color:'#e2e8f0',fontSize:13,fontWeight:600}}>{s.name}</div><div style={{color:'#64748b',fontSize:11}}>{$(s.avgPsf)} psf</div></div></div>)}</div></div></Card>
-<Card><h3 style={h3s}>PSF Distribution</h3><div style={{height:280}}><ResponsiveContainer width="100%" height="100%"><BarChart data={psfDist}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="range" tick={{fill:'#64748b',fontSize:9}} axisLine={false} angle={-30} textAnchor="end" height={60}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false}/><Tooltip content={<Tip prefix=""/>}/><Bar dataKey="count" name="Transactions" fill="#8b5cf6" radius={[4,4,0,0]}/></BarChart></ResponsiveContainer></div></Card>
-<Card><h3 style={h3s}>📉 Cumulative Volume</h3><div style={{height:280}}><ResponsiveContainer width="100%" height="100%"><AreaChart data={cumData}><defs><linearGradient id="cG" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.3}/><stop offset="95%" stopColor="#0ea5e9" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="date" tick={{fill:'#64748b',fontSize:9}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>`$${(v/1e9).toFixed(1)}B`}/><Tooltip content={<Tip/>}/><Area type="monotone" dataKey="cumulative" name="Cumulative" stroke="#0ea5e9" strokeWidth={2} fill="url(#cG)"/></AreaChart></ResponsiveContainer></div></Card>
-<Card><h3 style={h3s}>Property Type</h3><div style={{height:280}}><ResponsiveContainer width="100%" height="100%"><BarChart data={typeData}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="name" tick={{fill:'#64748b',fontSize:11}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgPsf" name="Avg PSF" fill="#14b8a6" radius={[6,6,0,0]} barSize={50}/></BarChart></ResponsiveContainer></div></Card>
-<Card><h3 style={h3s}>Tenure</h3><div style={{height:280}}><ResponsiveContainer width="100%" height="100%"><BarChart data={tenureData}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="name" tick={{fill:'#64748b',fontSize:11}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgPsf" name="Avg PSF" radius={[6,6,0,0]} barSize={50}>{tenureData.map((e,i)=><Cell key={i} fill={i===0?'#f59e0b':'#6366f1'}/>)}</Bar></BarChart></ResponsiveContainer></div></Card>
-<Card style={{gridColumn:'1/-1'}}><h3 style={h3s}>Top 10 Projects</h3><div style={{height:320}}><ResponsiveContainer width="100%" height="100%"><BarChart layout="vertical" data={topProj}><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#ffffff10"/><XAxis type="number" tick={{fill:'#64748b',fontSize:10}} axisLine={false}/><YAxis dataKey="name" type="category" width={180} tick={{fill:'#94a3b8',fontSize:10}} axisLine={false}/><Tooltip content={<Tip prefix=""/>}/><Bar dataKey="count" name="Transactions" fill="#6366f1" radius={[0,6,6,0]} barSize={18}>{topProj.map((e,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Bar></BarChart></ResponsiveContainer></div></Card>
-</div>)}
-{salesTab==='districts'&&(<div style={{display:'grid',gap:16}}><Card><h3 style={h3s}>District Trend</h3><div style={{height:420}}><ResponsiveContainer width="100%" height="100%"><LineChart data={distTrend}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="date" tick={{fill:'#64748b',fontSize:9}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Legend wrapperStyle={{fontSize:10}}/>{activeDist.map((d,i)=><Line key={d} type="monotone" dataKey={`D${d}`} name={`D${d}`} stroke={COLORS[i%COLORS.length]} strokeWidth={1.5} dot={false} connectNulls/>)}</LineChart></ResponsiveContainer></div></Card><Card><h3 style={h3s}>District YoY</h3><div style={{height:380}}><ResponsiveContainer width="100%" height="100%"><BarChart data={distYoY}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="year" tick={{fill:'#64748b',fontSize:11}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Legend wrapperStyle={{fontSize:10}}/>{activeDist.map((d,i)=><Bar key={d} dataKey={`D${d}`} name={`D${d}`} fill={COLORS[i%COLORS.length]} radius={[2,2,0,0]}/>)}</BarChart></ResponsiveContainer></div></Card></div>)}
-{salesTab==='advanced'&&(<div style={{display:'grid',gap:16}}><Card><h3 style={h3s}>Price vs Area</h3><div style={{height:420}}><ResponsiveContainer width="100%" height="100%"><ScatterChart><CartesianGrid strokeDasharray="3 3" stroke="#ffffff10"/><XAxis dataKey="area" name="Area" tick={{fill:'#64748b',fontSize:10}} axisLine={false}/><YAxis dataKey="psf" name="PSF" tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><ZAxis dataKey="price" range={[30,200]}/><Tooltip cursor={{strokeDasharray:'3 3'}} content={({payload})=>{if(!payload?.length)return null;const d=payload[0]?.payload;return <div style={{background:'#0f172af2',padding:'10px 14px',borderRadius:8,border:'1px solid #ffffff1a',fontSize:11,color:'#e2e8f0'}}><p style={{fontWeight:600,marginBottom:4}}>{d?.project}</p><p>Area: {d?.area?.toLocaleString()} sqft</p><p>PSF: ${d?.psf?.toLocaleString()}</p><p>Price: ${d?.price?.toLocaleString()}</p></div>;}}/><Legend wrapperStyle={{fontSize:11}}/>{scatterData.map(s=><Scatter key={s.segment} name={s.segment} data={s.data} fill={SC[s.segment]} opacity={0.7}/>)}</ScatterChart></ResponsiveContainer></div></Card>
-<Card style={{padding:0,overflow:'hidden'}}><div style={{padding:'20px 20px 16px',borderBottom:'1px solid #ffffff10',display:'flex',flexWrap:'wrap',justifyContent:'space-between',alignItems:'center',gap:12}}><h3 style={{color:'#e2e8f0',fontSize:15,fontWeight:600,margin:0}}>Heatmap · Floor × Year</h3><div style={{display:'flex',gap:8}}><button onClick={()=>setShowDiff(!showDiff)} style={{background:showDiff?'#38bdf833':'#ffffff10',border:showDiff?'1px solid #38bdf866':'1px solid #ffffff1a',borderRadius:8,padding:'6px 14px',fontSize:11,cursor:cp,color:showDiff?'#38bdf8':'#94a3b8'}}>± Changes</button><div style={{display:'flex',background:'#ffffff10',borderRadius:8,padding:2}}>{[{key:'psf',label:'$ PSF'},{key:'price',label:'Price'},{key:'volume',label:'Vol'}].map(m=><button key={m.key} onClick={()=>setHeatmapMetric(m.key)} style={{background:heatmapMetric===m.key?'#ffffff1f':'transparent',border:'none',borderRadius:6,padding:'5px 12px',fontSize:11,color:heatmapMetric===m.key?'#e2e8f0':'#64748b',cursor:cp}}>{m.label}</button>)}</div></div></div><div style={{padding:20,overflowX:'auto'}}>{matrix.cols.length===0?<div style={{textAlign:'center',padding:40,color:'#64748b'}}>No data</div>:(<div style={{minWidth:700}}><div style={{display:'flex'}}><div style={{width:70,flexShrink:0}}/>{matrix.cols.map(y=><div key={y} style={{flex:1,minWidth:70,textAlign:'center',fontSize:12,fontWeight:500,color:'#94a3b8',padding:'8px 0',borderBottom:'1px solid #ffffff14'}}>{y}</div>)}</div>{matrix.rows.map(floor=>(<div key={floor} style={{display:'flex',borderBottom:'1px solid #ffffff0a'}}><div style={{width:70,flexShrink:0,fontSize:12,fontWeight:600,color:'#cbd5e1',padding:'12px 8px',fontFamily:fm}}>{floor}</div>{matrix.cols.map(year=>{const k=`${floor}-${year}`;const cell=matrix.map.get(k);const dd=matrix.dm.get(k);let dv='-',bg='transparent',tc='#475569';if(showDiff){if(dd&&!dd.isBase){let diff=heatmapMetric==='psf'?dd.diffPsf:heatmapMetric==='price'?dd.diffPrice:dd.diffVol;if(diff!=null){dv=heatmapMetric==='volume'?(diff>0?'+':'')+diff:(diff>0?'+':'')+Math.round(diff);let mn=heatmapMetric==='psf'?matrix.mdp:heatmapMetric==='price'?matrix.mdpr:matrix.mdv;let mx=heatmapMetric==='psf'?matrix.xdp:heatmapMetric==='price'?matrix.xdpr:matrix.xdv;bg=getDC(diff,mn,mx);tc=diff>=0?'#4ade80':'#f87171';}}}else if(cell){let val;if(heatmapMetric==='psf'){val=Math.round(cell.totalPsf/cell.count);dv=`$${val.toLocaleString()}`;bg=getHC(val,matrix.mnP,matrix.mxP);tc=getHT(val,matrix.mnP,matrix.mxP);}else if(heatmapMetric==='price'){val=cell.totalPrice/cell.count;dv=$c(val);bg=getHC(val,matrix.mnPr,matrix.mxPr);tc=getHT(val,matrix.mnPr,matrix.mxPr);}else{val=cell.count;dv=val;bg=getHC(val,matrix.mnV,matrix.mxV);tc=getHT(val,matrix.mnV,matrix.mxV);}}return <div key={k} style={{flex:1,minWidth:70,height:42,display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontFamily:fm,fontWeight:500,backgroundColor:bg,color:tc}}>{dv}</div>;})}</div>))}</div>)}</div></Card>
-</div>)}
-{salesTab==='floor'&&(<div style={g2}><Card><h3 style={h3s}>Floor Premium</h3><div style={{height:340}}><ResponsiveContainer width="100%" height="100%"><BarChart data={floorPrem}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="floor" tick={{fill:'#64748b',fontSize:10}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgPsf" name="Avg PSF" radius={[6,6,0,0]} barSize={28}>{floorPrem.map((e,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Bar></BarChart></ResponsiveContainer></div></Card><Card><h3 style={h3s}>Floor Table</h3><div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><thead><tr style={{borderBottom:'1px solid #ffffff1a'}}>{['Floor','Avg PSF','Count','Prem $','Prem %'].map(h=><th key={h} style={thStyle}>{h}</th>)}</tr></thead><tbody>{floorPrem.map((f,i)=><tr key={f.floor} style={{borderBottom:'1px solid #ffffff0a',background:i%2===0?'transparent':'#ffffff05'}}><td style={{...tdStyle,color:'#e2e8f0',fontWeight:600,fontFamily:fm}}>{f.floor}</td><td style={{...tdStyle,color:'#38bdf8',fontFamily:fm}}>{$(f.avgPsf)}</td><td style={{...tdStyle,color:'#94a3b8'}}>{f.count}</td><td style={{...tdStyle,color:f.premDollar>0?'#34d399':f.premDollar<0?'#f87171':'#94a3b8',fontFamily:fm}}>{f.premDollar>0?'+':''}{$(f.premDollar)}</td><td style={{...tdStyle,color:f.premPct>0?'#34d399':f.premPct<0?'#f87171':'#94a3b8',fontFamily:fm}}>{f.premPct>0?'+':''}{f.premPct}%</td></tr>)}</tbody></table></div></Card></div>)}
-</div>}
-{}
-{section==='rental'&&<div style={{padding:'0 28px 28px'}}>
-{rentalTab==='overview'&&(<div style={g2}><Card><h3 style={h3s}>📈 Rental Trend</h3><div style={{height:280}}><ResponsiveContainer width="100%" height="100%"><ComposedChart data={rTrend}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="quarter" tick={{fill:'#64748b',fontSize:9}} axisLine={false} angle={-30} textAnchor="end" height={50}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgRent" name="Avg Rent" fill="#6366f1" radius={[4,4,0,0]} barSize={16}/><Line dataKey="avgRent" name="Trend" stroke="#34d399" strokeWidth={2} dot={false}/></ComposedChart></ResponsiveContainer></div></Card><Card><h3 style={h3s}>Rent by Bedroom</h3><div style={{height:280}}><ResponsiveContainer width="100%" height="100%"><BarChart data={rByBed}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="bedroom" tick={{fill:'#64748b',fontSize:11}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgRent" name="Avg Rent" radius={[6,6,0,0]} barSize={40}>{rByBed.map((e,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Bar></BarChart></ResponsiveContainer></div></Card><Card><h3 style={h3s}>📍 Avg Rent by District</h3><div style={{height:280}}><ResponsiveContainer width="100%" height="100%"><BarChart data={rByDist}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="district" tick={{fill:'#64748b',fontSize:9}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgRent" name="Avg Rent" fill="#14b8a6" radius={[4,4,0,0]} barSize={16}/></BarChart></ResponsiveContainer></div></Card><Card><h3 style={h3s}>🏘️ Rent by Property Type</h3><div style={{height:280}}><ResponsiveContainer width="100%" height="100%"><BarChart data={rByPropType}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="type" tick={{fill:'#64748b',fontSize:10}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgRent" name="Avg Rent" fill="#f59e0b" radius={[6,6,0,0]} barSize={50}>{rByPropType.map((e,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Bar></BarChart></ResponsiveContainer></div></Card></div>)}
-{rentalTab==='districts'&&(<div style={{display:'grid',gap:16}}><Card><h3 style={h3s}>📐 Rent PSF by District</h3><div style={{height:300}}><ResponsiveContainer width="100%" height="100%"><BarChart data={rPsfDist}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="district" tick={{fill:'#64748b',fontSize:9}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>`$${v.toFixed(1)}`}/><Tooltip content={<Tip/>}/><Bar dataKey="rentPsf" name="Rent PSF" fill="#f59e0b" radius={[4,4,0,0]} barSize={16}/></BarChart></ResponsiveContainer></div></Card><Card><h3 style={h3s}>📍 District Rental Trend</h3><div style={{height:380}}><ResponsiveContainer width="100%" height="100%"><LineChart data={rDistTrend}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="quarter" tick={{fill:'#64748b',fontSize:9}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Legend wrapperStyle={{fontSize:10}}/>{activeRDist.slice(0,15).map((d,i)=><Line key={d} type="monotone" dataKey={`D${d}`} name={`D${d}`} stroke={COLORS[i%COLORS.length]} strokeWidth={1.5} dot={false} connectNulls/>)}</LineChart></ResponsiveContainer></div></Card></div>)}
-{rentalTab==='projects'&&(<div style={g2}><Card style={{gridColumn:'1/-1'}}><h3 style={h3s}>🏆 Top Rental Projects</h3><div style={{height:340}}><ResponsiveContainer width="100%" height="100%"><BarChart layout="vertical" data={topRentProj}><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#ffffff10"/><XAxis type="number" tick={{fill:'#64748b',fontSize:10}} axisLine={false}/><YAxis dataKey="name" type="category" width={170} tick={{fill:'#94a3b8',fontSize:10}} axisLine={false}/><Tooltip content={({payload})=>{if(!payload?.length)return null;const d=payload[0]?.payload;return <div style={{background:'#0f172af2',padding:'10px 14px',borderRadius:8,border:'1px solid #ffffff1a',fontSize:11,color:'#e2e8f0'}}><p style={{fontWeight:600}}>{d?.name}</p><p>Contracts: {d?.count} · Avg: ${d?.avgRent?.toLocaleString()}/mo</p></div>;}}/><Bar dataKey="count" name="Contracts" fill="#34d399" radius={[0,6,6,0]} barSize={18}>{topRentProj.map((e,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Bar></BarChart></ResponsiveContainer></div></Card><Card><h3 style={h3s}>🏘️ Rent by Type</h3><div style={{height:280}}><ResponsiveContainer width="100%" height="100%"><BarChart data={rByPropType}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="type" tick={{fill:'#64748b',fontSize:10}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgRent" name="Avg Rent" fill="#f59e0b" radius={[6,6,0,0]} barSize={50}>{rByPropType.map((e,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Bar></BarChart></ResponsiveContainer></div></Card><Card><h3 style={h3s}>📊 Table</h3><div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><thead><tr style={{borderBottom:'1px solid #ffffff1a'}}>{['Project','Contracts','Avg Rent'].map(h=><th key={h} style={thStyle}>{h}</th>)}</tr></thead><tbody>{topRentProj.map((r,i)=><tr key={r.name} style={{borderBottom:'1px solid #ffffff0a',background:i%2===0?'transparent':'#ffffff05'}}><td style={{...tdStyle,color:'#e2e8f0',fontWeight:600}}>{r.name}</td><td style={{...tdStyle,color:'#94a3b8'}}>{r.count}</td><td style={{...tdStyle,color:'#34d399',fontFamily:fm}}>${r.avgRent.toLocaleString()}</td></tr>)}</tbody></table></div></Card></div>)}
-{rentalTab==='yield'&&(<div style={{display:'grid',gap:16}}><Card><h3 style={h3s}>💰 Gross Rental Yield</h3>{yieldData.length===0?<p style={{color:'#475569',fontSize:12,textAlign:'center',padding:20}}>Need both data sets</p>:(<div style={g2}><div style={{height:Math.max(320,yieldData.length*28)}}><ResponsiveContainer width="100%" height="100%"><BarChart data={yieldData} layout="vertical"><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#ffffff10"/><XAxis type="number" tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>`${v}%`}/><YAxis dataKey="district" type="category" width={50} tick={{fill:'#94a3b8',fontSize:11}} axisLine={false}/><Tooltip content={({payload})=>{if(!payload?.length)return null;const d=payload[0]?.payload;return <div style={{background:'#0f172af2',padding:'10px 14px',borderRadius:8,border:'1px solid #ffffff1a',fontSize:11,color:'#e2e8f0'}}><p style={{fontWeight:600}}>{d?.district} · Yield: {d?.yield}%</p><p>Rent: ${d?.rentPsf}/mo · Buy: ${d?.buyPsf?.toLocaleString()}</p></div>;}}/><Bar dataKey="yield" name="Yield %" radius={[0,6,6,0]} barSize={16}>{yieldData.map((e,i)=><Cell key={i} fill={e.yield>=3?'#22c55e':e.yield>=2.5?'#f59e0b':'#ef4444'}/>)}</Bar></BarChart></ResponsiveContainer></div><div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><thead><tr style={{borderBottom:'1px solid #ffffff1a'}}>{['District','Rent PSF','Buy PSF','Yield'].map(h=><th key={h} style={thStyle}>{h}</th>)}</tr></thead><tbody>{yieldData.map((r,i)=><tr key={r.district} style={{borderBottom:'1px solid #ffffff0a',background:i%2===0?'transparent':'#ffffff05'}}><td style={{...tdStyle,color:'#e2e8f0',fontWeight:600,fontFamily:fm}}>{r.district}</td><td style={{...tdStyle,color:'#f59e0b',fontFamily:fm}}>${r.rentPsf}</td><td style={{...tdStyle,color:'#38bdf8',fontFamily:fm}}>${r.buyPsf.toLocaleString()}</td><td style={{...tdStyle,color:r.yield>=3?'#22c55e':r.yield>=2.5?'#f59e0b':'#ef4444',fontWeight:700,fontFamily:fm}}>{r.yield}%</td></tr>)}</tbody></table></div></div>)}</Card><Card><h3 style={h3s}>📊 Sale PSF vs Rent PSF</h3><div style={{height:340}}><ResponsiveContainer width="100%" height="100%"><BarChart data={yieldData}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="district" tick={{fill:'#64748b',fontSize:10}} axisLine={false}/><YAxis yAxisId="left" tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><YAxis yAxisId="right" orientation="right" tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>`$${v}`}/><Tooltip content={<Tip/>}/><Legend wrapperStyle={{fontSize:11}}/><Bar yAxisId="left" dataKey="buyPsf" name="Sale PSF" fill="#38bdf8" radius={[4,4,0,0]} barSize={14}/><Bar yAxisId="right" dataKey="rentPsf" name="Rent PSF/mo" fill="#34d399" radius={[4,4,0,0]} barSize={14}/></BarChart></ResponsiveContainer></div></Card></div>)}
-</div>}
-{}
-{section==='analyze'&&<div style={{padding:'0 28px 28px'}}>
-{!analyzeProject?(
-<div style={{textAlign:'center',padding:'80px 0'}}><div style={{fontSize:56,marginBottom:16}}>🔍</div><h2 style={{color:'#e2e8f0',fontSize:22,fontWeight:600,marginBottom:8}}>Property Deep Dive</h2><p style={{color:'#64748b',fontSize:14,maxWidth:400,margin:'0 auto'}}>Search for any project above to see comprehensive sales &amp; rental analysis, floor premiums, comparisons, yield, and transaction records.</p></div>
-):(
-<div>
-{}
-<div style={{background:'linear-gradient(135deg,#a78bfa14,#38bdf80d)',borderRadius:16,padding:'24px 28px',border:'1px solid #a78bfa26',marginBottom:20}}>
-<h2 style={{color:'#f1f5f9',fontSize:22,fontWeight:700,margin:0}}>{analyzeProject}</h2>
-{projInfo&&<div style={{display:'flex',gap:12,marginTop:10,flexWrap:'wrap'}}>
-{[{l:'District',v:`D${projInfo.district}`,c:'#38bdf8'},{l:'Segment',v:projInfo.segment,c:SC[projInfo.segment]||'#94a3b8'},{l:'Type',v:projInfo.type,c:'#e2e8f0'},{l:'Tenure',v:projInfo.tenure,c:'#f59e0b'},{l:'Street',v:projInfo.street,c:'#94a3b8'}].filter(x=>x.v).map(x=><span key={x.l} style={{background:'#ffffff10',borderRadius:8,padding:'4px 12px',fontSize:12}}><span style={{color:'#64748b'}}>{x.l}: </span><span style={{color:x.c,fontWeight:600}}>{x.v}</span></span>)}
-</div>}
-<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginTop:20}}>
-<div style={{background:'#38bdf80f',borderRadius:12,padding:16,border:'1px solid #38bdf81f'}}>
-<div style={{color:'#38bdf8',fontSize:13,fontWeight:600,marginBottom:12}}>💰 Sales</div>
-{projSaleStats?<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}><div><div style={{color:'#64748b',fontSize:10}}>TRANSACTIONS</div><div style={{color:'#e2e8f0',fontSize:16,fontWeight:700,fontFamily:fm}}>{projSaleStats.count}</div></div><div><div style={{color:'#64748b',fontSize:10}}>AVG PSF</div><div style={{color:'#38bdf8',fontSize:16,fontWeight:700,fontFamily:fm}}>{$(projSaleStats.avgPsf)}</div></div><div><div style={{color:'#64748b',fontSize:10}}>AVG PRICE</div><div style={{color:'#e2e8f0',fontSize:14,fontWeight:600,fontFamily:fm}}>{$c(projSaleStats.avgPrice)}</div></div><div><div style={{color:'#64748b',fontSize:10}}>PSF RANGE</div><div style={{color:'#94a3b8',fontSize:13,fontFamily:fm,fontWeight:600}}>{$(projSaleStats.minPsf)}–{$(projSaleStats.maxPsf)}</div></div>{projLatestSaleStats&&<div style={{gridColumn:'1/-1',marginTop:4,paddingTop:8,borderTop:'1px solid #38bdf81a',display:'flex',gap:12,alignItems:'center',flexWrap:'wrap'}}><span style={{background:'#38bdf826',borderRadius:5,padding:'2px 8px',fontSize:10,fontWeight:700,color:'#38bdf8'}}>{projLatestSaleStats.year}</span><span style={{color:'#64748b',fontSize:10}}>AVG PSF <span style={{color:'#38bdf8',fontWeight:700,fontFamily:fm}}>{$(projLatestSaleStats.avgPsf)}</span></span><span style={{color:'#64748b',fontSize:10}}>RANGE <span style={{color:'#e2e8f0',fontWeight:700,fontFamily:fm}}>{$(projLatestSaleStats.minPsf)}–{$(projLatestSaleStats.maxPsf)}</span></span><span style={{color:'#475569',fontSize:10}}>{projLatestSaleStats.count} txns</span></div>}</div>:<div style={{color:'#475569',fontSize:12}}>No sales data</div>}
-</div>
-<div style={{background:'#34d3990f',borderRadius:12,padding:16,border:'1px solid #34d3991f'}}>
-<div style={{color:'#34d399',fontSize:13,fontWeight:600,marginBottom:12}}>🏠 Rental{(projLatestYield||projYield)&&<span style={{background:(projLatestYield?projLatestYield.yield:projYield)>=3?'#22c55e33':(projLatestYield?projLatestYield.yield:projYield)>=2.5?'#f59e0b33':'#ef444433',borderRadius:6,padding:'2px 8px',fontSize:11,marginLeft:8,color:(projLatestYield?projLatestYield.yield:projYield)>=3?'#22c55e':(projLatestYield?projLatestYield.yield:projYield)>=2.5?'#f59e0b':'#ef4444'}}>Yield: {projLatestYield?projLatestYield.yield:projYield}%{projLatestYield&&<span style={{opacity:0.7,marginLeft:4,fontSize:10}}>({projLatestYield.year})</span>}</span>}</div>
-{projRentStats?<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}><div><div style={{color:'#64748b',fontSize:10}}>CONTRACTS</div><div style={{color:'#e2e8f0',fontSize:16,fontWeight:700,fontFamily:fm}}>{projRentStats.count}</div></div><div><div style={{color:'#64748b',fontSize:10}}>AVG RENT</div><div style={{color:'#34d399',fontSize:16,fontWeight:700,fontFamily:fm}}>${projRentStats.avgRent.toLocaleString()}</div></div><div><div style={{color:'#64748b',fontSize:10}}>MEDIAN RENT</div><div style={{color:'#e2e8f0',fontSize:14,fontWeight:600,fontFamily:fm}}>${projRentStats.medianRent.toLocaleString()}</div></div><div><div style={{color:'#64748b',fontSize:10}}>RENT PSF</div><div style={{color:'#f59e0b',fontSize:13,fontFamily:fm,fontWeight:600}}>${projRentStats.avgRentPsf}/sqft</div></div>{projLatestRentStats&&<div style={{gridColumn:'1/-1',marginTop:4,paddingTop:8,borderTop:'1px solid #34d3991a',display:'flex',gap:12,alignItems:'center',flexWrap:'wrap'}}><span style={{background:'#34d39926',borderRadius:5,padding:'2px 8px',fontSize:10,fontWeight:700,color:'#34d399'}}>{projLatestRentStats.year}</span><span style={{color:'#64748b',fontSize:10}}>AVG RENT <span style={{color:'#34d399',fontWeight:700,fontFamily:fm}}>${projLatestRentStats.avgRent.toLocaleString()}</span></span><span style={{color:'#64748b',fontSize:10}}>RENT PSF <span style={{color:'#f59e0b',fontWeight:700,fontFamily:fm}}>${projLatestRentStats.avgRentPsf}/sqft</span></span><span style={{color:'#475569',fontSize:10}}>{projLatestRentStats.count} contracts</span></div>}</div>:<div style={{color:'#475569',fontSize:12}}>No rental data</div>}
-</div>
-</div>
-</div>
-{}
-{analyzeTab==='trends'&&(<div style={g2}>
-<Card><h3 style={h3s}>Sale PSF Trend</h3><div style={{height:280}}>{projPsfTrend.length?<ResponsiveContainer width="100%" height="100%"><ComposedChart data={projPsfTrend}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="date" tick={{fill:'#64748b',fontSize:9}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgPsf" name="Avg PSF" fill="#6366f1" radius={[4,4,0,0]} barSize={12}/><Line dataKey="avgPsf" name="Trend" stroke="#38bdf8" strokeWidth={2} dot={false}/></ComposedChart></ResponsiveContainer>:<div style={noDataS}>No sales data</div>}</div></Card>
-<Card><h3 style={h3s}>Rental Trend</h3><div style={{height:280}}>{projRentTrend.length?<ResponsiveContainer width="100%" height="100%"><ComposedChart data={projRentTrend}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="quarter" tick={{fill:'#64748b',fontSize:9}} axisLine={false} angle={-20} textAnchor="end" height={45}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgRent" name="Avg Rent" fill="#10b981" radius={[4,4,0,0]} barSize={16}/><Line dataKey="avgRent" name="Trend" stroke="#34d399" strokeWidth={2} dot={false}/></ComposedChart></ResponsiveContainer>:<div style={noDataS}>No rental data</div>}</div></Card>
-<Card><h3 style={h3s}>Rent by Bedroom</h3><div style={{height:280}}>{projRentByBed.length?<ResponsiveContainer width="100%" height="100%"><BarChart data={projRentByBed}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="bedroom" tick={{fill:'#64748b',fontSize:11}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgRent" name="Avg Rent" radius={[6,6,0,0]} barSize={40}>{projRentByBed.map((e,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Bar></BarChart></ResponsiveContainer>:<div style={noDataS}>No data</div>}</div></Card>
-<Card><h3 style={h3s}>Area vs PSF</h3><div style={{height:280}}>{projScatter.length?<ResponsiveContainer width="100%" height="100%"><ScatterChart><CartesianGrid strokeDasharray="3 3" stroke="#ffffff10"/><XAxis dataKey="area" name="Area (sqft)" tick={{fill:'#64748b',fontSize:10}} axisLine={false}/><YAxis dataKey="psf" name="PSF" tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>`$${v}`}/><Tooltip cursor={{strokeDasharray:'3 3'}} content={({payload})=>{if(!payload?.length)return null;const d=payload[0]?.payload;return <div style={{background:'#0f172af2',padding:'10px 14px',borderRadius:8,border:'1px solid #ffffff1a',fontSize:11,color:'#e2e8f0'}}><p>Floor: {d?.floor} · {d?.date}</p><p>Area: {d?.area?.toLocaleString()} sqft · PSF: ${d?.psf?.toLocaleString()}</p><p>Price: ${d?.price?.toLocaleString()}</p></div>;}}/><Scatter data={projScatter} fill="#a78bfa" opacity={0.8}/></ScatterChart></ResponsiveContainer>:<div style={noDataS}>No data</div>}</div></Card>
-</div>)}
-{}
-{analyzeTab==='pricing'&&(()=>{
-const defArea=projAreas.length?projAreas[Math.floor(projAreas.length/2)]:0;
-const rawArea=parseFloat(pricingArea)||defArea;
-const area=projAreas.length?projAreas.reduce((p,c)=>Math.abs(c-rawArea)<Math.abs(p-rawArea)?c:p):rawArea;
-const sf=pricingFloor;const yr=projLatestSaleYear;
-const latAll=projTx.filter(t=>t.year===yr);
-const latPsf=latAll.length?Math.round((latAll.reduce((s,t)=>s+t.psf,0)/latAll.length)*100)/100:projSaleStats?projSaleStats.avgPsf:0;
-const sizeTx=area>0?latAll.filter(t=>t.areaSqft===area):[];
-const sizePsf=sizeTx.length?Math.round((sizeTx.reduce((s,t)=>s+t.psf,0)/sizeTx.length)*100)/100:0;
-const matchTx=sf&&area>0?sizeTx.filter(t=>t.floorRange===sf):[];
-const matchPsf=matchTx.length?Math.round((matchTx.reduce((s,t)=>s+t.psf,0)/matchTx.length)*100)/100:0;
-const bestPsf=matchPsf||sizePsf||latPsf;
-const bestLabel=matchPsf?'Exact Match':sizePsf?'Size Match':'Project Avg';
-const bestTx=matchPsf?matchTx:sizePsf?sizeTx:latAll;
-const iS={background:'#ffffff10',border:'1px solid #ffffff1f',borderRadius:8,padding:'8px 12px',color:'#e2e8f0',fontSize:13,fontFamily:fm,outline:'none',width:'100%'};
-const srt=a=>[...a].sort((a,b)=>b.contractDate.localeCompare(a.contractDate));
-const tR=(tx,n)=>srt(tx).slice(0,n||5).map((t,i)=> <tr key={i} style={{borderBottom:'1px solid #ffffff08'}}>
-<td style={{...tdStyle,color:'#94a3b8',fontSize:11,padding:'8px 10px'}}>{t.contractDate}</td>
-<td style={{...tdStyle,color:'#e2e8f0',fontFamily:fm,fontSize:11,padding:'8px 10px'}}>{t.areaSqft.toLocaleString()}</td>
-<td style={{...tdStyle,color:'#e2e8f0',fontFamily:fm,fontSize:11,padding:'8px 10px'}}>{t.floorRange}</td>
-<td style={{...tdStyle,color:'#38bdf8',fontFamily:fm,fontWeight:600,fontSize:11,padding:'8px 10px'}}>{$(t.psf)}</td>
-<td style={{...tdStyle,color:'#e2e8f0',fontFamily:fm,fontWeight:600,fontSize:11,padding:'8px 10px'}}>{$c(t.priceNum)}</td></tr>);
-const tH=<tr style={{borderBottom:'1px solid #ffffff1a'}}>{['Date','Size','Floor','PSF','Price'].map(h=><th key={h} style={{...thStyle,fontSize:10,padding:'8px 10px'}}>{h}</th>)}</tr>;
-return (<div style={{display:'grid',gap:14}}>
-<Card style={{background:'linear-gradient(135deg,#1e293b,#0f172a)',border:'1px solid #a78bfa33',padding:0,overflow:'hidden'}}>
-<div style={{padding:'24px 24px 20px'}}>
-<div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:20}}>
-<div>
-<div style={{color:'#94a3b8',fontSize:11,fontWeight:600,letterSpacing:1,marginBottom:8}}>ESTIMATED PRICE{yr&&<span style={{background:'#22c55e26',borderRadius:4,padding:'2px 8px',fontSize:9,fontWeight:700,color:'#4ade80',marginLeft:8}}>{yr}</span>}</div>
-<div style={{color:'#e2e8f0',fontSize:36,fontWeight:800,fontFamily:fm,lineHeight:1}}>{$c(bestPsf*area)}</div>
-<div style={{color:'#64748b',fontSize:12,marginTop:8}}>{$(bestPsf)} PSF × {area.toLocaleString()} sqft</div>
-</div>
-<div style={{background:'#ffffff08',borderRadius:10,padding:'10px 14px',textAlign:'right'}}>
-<div style={{color:'#64748b',fontSize:9,marginBottom:2}}>BASED ON</div>
-<div style={{color:'#a78bfa',fontSize:13,fontWeight:700}}>{bestLabel}</div>
-<div style={{color:'#475569',fontSize:10}}>{bestTx.length} transaction{bestTx.length!==1?'s':''}</div>
-</div>
-</div>
-<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-<div><label style={{color:'#94a3b8',fontSize:10,fontWeight:600,marginBottom:6,display:'block'}}>UNIT TYPE</label>
-{projAreas.length>0?<div style={{display:'flex',gap:4,flexWrap:'wrap'}}>{projAreas.map(a=><button key={a} onClick={()=>setPricingArea(String(a))} style={{background:area===a?'#a78bfa':'#ffffff0a',border:area===a?'1px solid #a78bfa':'1px solid #ffffff1f',borderRadius:6,padding:'6px 12px',fontSize:12,color:area===a?'#fff':'#94a3b8',cursor:cp,fontFamily:fm,fontWeight:area===a?700:400}}>{a.toLocaleString()}</button>)}</div>:<input type="number" value={pricingArea} onChange={e=>setPricingArea(e.target.value)} placeholder="sqft" style={iS}/>}
-</div>
-<div><label style={{color:'#94a3b8',fontSize:10,fontWeight:600,marginBottom:6,display:'block'}}>FLOOR LEVEL</label>
-<select value={pricingFloor} onChange={e=>setPricingFloor(e.target.value)} style={{...iS,cursor:cp}}>
-<option value="">All floors</option>
-{projFloorDetail.map(f=><option key={f.floor} value={f.floor}>{f.floor} ({f.allCount} tx)</option>)}
-</select></div>
-</div></div>
-<div style={{borderTop:'1px solid #ffffff10',display:'grid',gridTemplateColumns:sf?(sizePsf?'1fr 1fr 1fr':'1fr 1fr'):(sizePsf?'1fr 1fr':'1fr'),background:'#ffffff04'}}>
-{(()=>{const cols=[{psf:latPsf,label:'Project Avg',sub:`All sizes · All floors · ${latAll.length}tx`,c:'#94a3b8',active:!sizePsf&&!matchPsf}];
-if(sizePsf)cols.push({psf:sizePsf,label:`${area.toLocaleString()} sqft`,sub:`Exact size · All floors · ${sizeTx.length}tx`,c:'#38bdf8',active:!matchPsf});
-if(sf)cols.push(matchPsf?{psf:matchPsf,label:`${area.toLocaleString()} · Fl ${sf}`,sub:`Exact size & floor · ${matchTx.length}tx`,c:'#22c55e',active:true}:{psf:0,label:`Fl ${sf}`,sub:'No matching tx',c:'#475569',active:false});
-return cols.map((t,i)=> <div key={i} style={{padding:'14px 16px',borderRight:i<cols.length-1?'1px solid #ffffff0a':'none',background:t.active?'#a78bfa0a':'transparent'}}>
-<div style={{color:t.c,fontSize:18,fontWeight:800,fontFamily:fm}}>{t.psf?$c(t.psf*area):'—'}</div>
-<div style={{color:'#94a3b8',fontSize:10,fontWeight:600,marginTop:2}}>{t.label}</div>
-<div style={{color:'#475569',fontSize:9,marginTop:2}}>{t.sub}</div>
-{t.psf>0&&latPsf>0&&t.psf!==latPsf&&<div style={{color:t.psf<latPsf?'#4ade80':'#f87171',fontSize:10,fontWeight:600,fontFamily:fm,marginTop:4}}>{t.psf<latPsf?'':'+'}{Math.round((t.psf-latPsf)/latPsf*1000)/10}% vs avg</div>}
-</div>);})()}
-</div></Card>
-{bestTx.length>0&&<Card style={{padding:0,overflow:'hidden'}}>
-<div style={{padding:'14px 20px',borderBottom:'1px solid #ffffff10',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-<span style={{color:'#e2e8f0',fontSize:13,fontWeight:600}}>Transactions Used</span>
-<span style={{color:'#64748b',fontSize:11}}>{bestLabel} · {bestTx.length} record{bestTx.length!==1?'s':''}</span>
-</div>
-<div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse'}}><thead>{tH}</thead><tbody>{tR(bestTx,8)}</tbody></table>
-{bestTx.length>8&&<div style={{color:'#475569',fontSize:10,textAlign:'center',padding:8}}>+{bestTx.length-8} more</div>}
-</div></Card>}
-</div>);})()}
-{analyzeTab==='floor'&&(<div style={g2}>
-<Card><h3 style={h3s}>Floor Premium</h3><div style={{height:340}}>{projFloor.length?<ResponsiveContainer width="100%" height="100%"><BarChart data={projFloor}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="floor" tick={{fill:'#64748b',fontSize:10}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Bar dataKey="avgPsf" name="Avg PSF" radius={[6,6,0,0]} barSize={28}>{projFloor.map((e,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</Bar></BarChart></ResponsiveContainer>:<div style={noDataS}>No floor data</div>}</div></Card>
-<Card><h3 style={h3s}>Floor Table</h3><div style={{overflowX:'auto'}}>{projFloor.length?<table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><thead><tr style={{borderBottom:'1px solid #ffffff1a'}}>{['Floor','Avg PSF','Count','Prem $','Prem %'].map(h=><th key={h} style={thStyle}>{h}</th>)}</tr></thead><tbody>{projFloor.map((f,i)=><tr key={f.floor} style={{borderBottom:'1px solid #ffffff0a',background:i%2===0?'transparent':'#ffffff05'}}><td style={{...tdStyle,color:'#e2e8f0',fontWeight:600,fontFamily:fm}}>{f.floor}</td><td style={{...tdStyle,color:'#38bdf8',fontFamily:fm}}>{$(f.avgPsf)}</td><td style={{...tdStyle,color:'#94a3b8'}}>{f.count}</td><td style={{...tdStyle,color:f.premDollar>0?'#34d399':f.premDollar<0?'#f87171':'#94a3b8',fontFamily:fm}}>{f.premDollar>0?'+':''}{$(f.premDollar)}</td><td style={{...tdStyle,color:f.premPct>0?'#34d399':f.premPct<0?'#f87171':'#94a3b8',fontFamily:fm}}>{f.premPct>0?'+':''}{f.premPct}%</td></tr>)}</tbody></table>:<div style={{color:'#475569',fontSize:12,textAlign:'center',padding:40}}>No floor data</div>}</div></Card>
-</div>)}
-{}
-{analyzeTab==='compare'&&(<div style={{display:'grid',gap:16}}>
-<Card><h3 style={{color:'#e2e8f0',fontSize:14,fontWeight:600,marginBottom:4}}>Project vs District vs Segment</h3><p style={{color:'#64748b',fontSize:11,marginBottom:16}}>{analyzeProject} vs District & Segment</p><div style={{height:380}}><ResponsiveContainer width="100%" height="100%"><LineChart data={projComparison}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="date" tick={{fill:'#64748b',fontSize:9}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Legend wrapperStyle={{fontSize:11}}/><Line type="monotone" dataKey="project" name={analyzeProject.length>20?analyzeProject.substring(0,20)+'…':analyzeProject} stroke="#a78bfa" strokeWidth={2.5} dot={{r:3,fill:'#a78bfa'}} connectNulls/><Line type="monotone" dataKey="district" name={`D${projInfo?.district} Avg`} stroke="#38bdf8" strokeWidth={1.5} strokeDasharray="5 5" dot={false} connectNulls/><Line type="monotone" dataKey="segment" name={`${projInfo?.segment} Avg`} stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls/></LineChart></ResponsiveContainer></div></Card>
-<Card><h3 style={h3s}>Nearby in D{projInfo?.district}</h3><div style={{overflowX:'auto'}}>{nearbyProjects.length?<table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}><thead><tr style={{borderBottom:'1px solid #ffffff1a'}}>{['Project','Txns','Avg PSF','vs This'].map(h=><th key={h} style={thStyle}>{h}</th>)}</tr></thead><tbody>{nearbyProjects.map((p,i)=>{const diff=projSaleStats?p.avgPsf-projSaleStats.avgPsf:0;const pct=projSaleStats&&projSaleStats.avgPsf?((diff/projSaleStats.avgPsf)*100):0;return <tr key={p.name} style={{borderBottom:'1px solid #ffffff0a',background:i%2===0?'transparent':'#ffffff05'}}><td style={{...tdStyle,color:'#e2e8f0',fontWeight:500}}>{p.name}</td><td style={{...tdStyle,color:'#94a3b8'}}>{p.count}</td><td style={{...tdStyle,color:'#38bdf8',fontFamily:fm}}>{$(p.avgPsf)}</td><td style={{...tdStyle,color:diff>=0?'#34d399':'#f87171',fontFamily:fm}}>{diff>=0?'+':''}{Math.round(pct)}%</td></tr>;})}</tbody></table>:<div style={{color:'#475569',fontSize:12,textAlign:'center',padding:20}}>No nearby projects</div>}</div></Card>
-</div>)}
-{}
-{analyzeTab==='yield'&&(<div style={g2}>
-<Card style={{gridColumn:'1/-1'}}><h3 style={h3s}>💰 Investment</h3><div style={{display:'grid',gridTemplateColumns:projLatestYield?'repeat(5,1fr)':'repeat(4,1fr)',gap:12}}><Stat label="Avg Buy PSF" value={projSaleStats?$(projSaleStats.avgPsf):'N/A'} color="#38bdf8" icon="💰" sub=''/><Stat label="Avg Rent" value={projRentStats?`$${projRentStats.avgRent.toLocaleString()}`:'N/A'} color="#34d399" icon="🏠" sub=''/><Stat label="Rent PSF/mo" value={projRentStats?`$${projRentStats.avgRentPsf}`:'N/A'} color="#f59e0b" icon="📐" sub=''/><Stat label="Yield (All)" value={projYield?`${projYield}%`:'N/A'} color={projYield&&projYield>=3?'#22c55e':projYield&&projYield>=2.5?'#f59e0b':'#ef4444'} icon="📊" sub="All-time"/>{projLatestYield&&<Stat label={`Yield (${projLatestYield.year})`} value={`${projLatestYield.yield}%`} color={projLatestYield.yield>=3?'#22c55e':projLatestYield.yield>=2.5?'#f59e0b':'#ef4444'} icon="🎯" sub={`Buy $${Math.round(projLatestYield.buyPsf)} · Rent $${projLatestYield.rentPsf}/mo`}/>}</div></Card>
-<Card><h3 style={h3s}>Price Trend</h3><div style={{height:280}}>{projPsfTrend.length?<ResponsiveContainer width="100%" height="100%"><AreaChart data={projPsfTrend}><defs><linearGradient id="pG" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#a78bfa" stopOpacity={0.3}/><stop offset="95%" stopColor="#a78bfa" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="date" tick={{fill:'#64748b',fontSize:9}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Area type="monotone" dataKey="avgPsf" name="PSF" stroke="#a78bfa" strokeWidth={2} fill="url(#pG)"/></AreaChart></ResponsiveContainer>:<div style={noDataS}>No data</div>}</div></Card>
-<Card><h3 style={h3s}>Rental Trend</h3><div style={{height:280}}>{projRentTrend.length?<ResponsiveContainer width="100%" height="100%"><AreaChart data={projRentTrend}><defs><linearGradient id="rG" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#34d399" stopOpacity={0.3}/><stop offset="95%" stopColor="#34d399" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff10"/><XAxis dataKey="quarter" tick={{fill:'#64748b',fontSize:9}} axisLine={false}/><YAxis tick={{fill:'#64748b',fontSize:10}} axisLine={false} tickFormatter={v=>'$'+v.toLocaleString()}/><Tooltip content={<Tip/>}/><Area type="monotone" dataKey="avgRent" name="Avg Rent" stroke="#34d399" strokeWidth={2} fill="url(#rG)"/></AreaChart></ResponsiveContainer>:<div style={noDataS}>No data</div>}</div></Card>
-</div>)}
-{}
-{analyzeTab==='records'&&(<div>
-{}
-<div style={{display:'flex',gap:0,marginBottom:16,background:'#ffffff0a',borderRadius:10,padding:3,width:'fit-content',border:'1px solid #ffffff10'}}>
-<button onClick={()=>setRecordsView('sales')} style={{background:recordsView==='sales'?'#38bdf826':'transparent',border:recordsView==='sales'?'1px solid #38bdf84d':'1px solid transparent',borderRadius:8,padding:'7px 20px',color:recordsView==='sales'?'#38bdf8':'#64748b',fontSize:12,fontWeight:600,cursor:cp}}>💰 Sales ({projTx.length})</button>
-<button onClick={()=>setRecordsView('rentals')} style={{background:recordsView==='rentals'?'#34d39926':'transparent',border:recordsView==='rentals'?'1px solid #34d3994d':'1px solid transparent',borderRadius:8,padding:'7px 20px',color:recordsView==='rentals'?'#34d399':'#64748b',fontSize:12,fontWeight:600,cursor:cp}}>🏠 Rentals ({projRent.length})</button>
-</div>
-{}
-{recordsView==='sales'&&(
-<Card style={{padding:0,overflow:'hidden'}}>
-<div style={{padding:'16px 20px',borderBottom:'1px solid #ffffff10',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-<h3 style={{color:'#e2e8f0',fontSize:14,fontWeight:600,margin:0}}>Sale Transactions · {projTx.length} records</h3>
-<span style={{color:'#64748b',fontSize:11}}>Click headers to sort</span>
-</div>
-<div style={{overflowX:'auto',maxHeight:500,overflowY:'auto'}}>
-<table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:800}}>
-<thead style={{position:'sticky',top:0,background:'#1e293b',zIndex:2}}>
-<tr style={{borderBottom:'1px solid #ffffff1a'}}>
-<SortTh label="Date" field="contractDate" sortField={saleSortField} sortDir={saleSortDir} onSort={toggleSaleSort}/>
-<SortTh label="Floor" field="floorRange" sortField={saleSortField} sortDir={saleSortDir} onSort={toggleSaleSort}/>
-<SortTh label="Area (sqft)" field="areaSqft" sortField={saleSortField} sortDir={saleSortDir} onSort={toggleSaleSort} align="right"/>
-<SortTh label="Price" field="priceNum" sortField={saleSortField} sortDir={saleSortDir} onSort={toggleSaleSort} align="right"/>
-<SortTh label="PSF" field="psf" sortField={saleSortField} sortDir={saleSortDir} onSort={toggleSaleSort} align="right"/>
-<SortTh label="Type" field="typeOfSale" sortField={saleSortField} sortDir={saleSortDir} onSort={toggleSaleSort}/>
-</tr>
-</thead>
-<tbody>
-{sortedProjTx.map((t,i)=>(
-<tr key={t.id} style={{borderBottom:'1px solid #ffffff0a',background:i%2===0?'transparent':'#ffffff04'}}>
-<td style={{...tdStyle,color:'#e2e8f0',fontFamily:fm,whiteSpace:'nowrap'}}>{t.contractDate}</td>
-<td style={{...tdStyle,color:'#94a3b8',fontFamily:fm}}>{t.floorRange}</td>
-<td style={{...tdStyle,color:'#94a3b8',fontFamily:fm,textAlign:'right'}}>{t.areaSqft.toLocaleString()}</td>
-<td style={{...tdStyle,color:'#e2e8f0',fontFamily:fm,textAlign:'right',fontWeight:600}}>{$c(t.priceNum)}</td>
-<td style={{...tdStyle,color:'#38bdf8',fontFamily:fm,textAlign:'right',fontWeight:600}}>{$(t.psf)}</td>
-<td style={{...tdStyle,color:t.typeOfSale==='New Sale'?'#34d399':t.typeOfSale==='Resale'?'#f59e0b':'#a78bfa'}}>{t.typeOfSale}</td>
-</tr>
-))}
-</tbody>
-</table>
-</div>
-</Card>
-)}
-{}
-{recordsView==='rentals'&&(
-<Card style={{padding:0,overflow:'hidden'}}>
-<div style={{padding:'16px 20px',borderBottom:'1px solid #ffffff10',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-<h3 style={{color:'#e2e8f0',fontSize:14,fontWeight:600,margin:0}}>Rental Contracts · {projRent.length} records</h3>
-<span style={{color:'#64748b',fontSize:11}}>Click headers to sort</span>
-</div>
-<div style={{overflowX:'auto',maxHeight:500,overflowY:'auto'}}>
-<table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:700}}>
-<thead style={{position:'sticky',top:0,background:'#1e293b',zIndex:2}}>
-<tr style={{borderBottom:'1px solid #ffffff1a'}}>
-<SortTh label="Quarter" field="leaseDate" sortField={rentSortField} sortDir={rentSortDir} onSort={toggleRentSort}/>
-<SortTh label="Bedrooms" field="noOfBedRoom" sortField={rentSortField} sortDir={rentSortDir} onSort={toggleRentSort}/>
-<SortTh label="Area (sqft)" field="areaMid" sortField={rentSortField} sortDir={rentSortDir} onSort={toggleRentSort} align="right"/>
-<SortTh label="Rent/mo" field="rent" sortField={rentSortField} sortDir={rentSortDir} onSort={toggleRentSort} align="right"/>
-<th style={thStyle}>Rent PSF</th>
-</tr>
-</thead>
-<tbody>
-{sortedProjRent.map((r,i)=>{const q=pLQ(r.leaseDate);const mid=pAM(r.areaSqft);const rpsf=mid>0?(r.rent/mid):0;return(
-<tr key={i} style={{borderBottom:'1px solid #ffffff0a',background:i%2===0?'transparent':'#ffffff04'}}>
-<td style={{...tdStyle,color:'#e2e8f0',fontFamily:fm,whiteSpace:'nowrap'}}>{q?q.label:r.leaseDate}</td>
-<td style={{...tdStyle,color:'#94a3b8'}}>{r.noOfBedRoom} BR</td>
-<td style={{...tdStyle,color:'#94a3b8',fontFamily:fm,textAlign:'right'}}>{r.areaSqft}</td>
-<td style={{...tdStyle,color:'#34d399',fontFamily:fm,textAlign:'right',fontWeight:600}}>${r.rent.toLocaleString()}</td>
-<td style={{...tdStyle,color:'#f59e0b',fontFamily:fm,textAlign:'right'}}>{rpsf>0?`$${rpsf.toFixed(2)}`:'-'}</td>
-</tr>
-);})}
-</tbody>
-</table>
-</div>
-</Card>
-)}
-</div>)}
-</div>
-)}
-</div>}
-<div style={{textAlign:'center',padding:'20px 28px',borderTop:'1px solid #ffffff10',color:'#475569',fontSize:11}}>URA Property Analytics · {allTransactions.length.toLocaleString()} sales · {allRentals.length.toLocaleString()} rentals</div>
-</div>
-);
+
+const $f = v => `$${v.toLocaleString(undefined,{maximumFractionDigits:2})}`;
+const $c = v => `$${Math.round(v).toLocaleString()}`;
+const fm = "'JetBrains Mono', monospace";
+const cp = 'pointer';
+
+export default function App() {
+  const [allTransactions, setAllTransactions] = useState([]);
+  const [allRentals, setAllRentals] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [rentalLoading, setRentalLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  // Filters
+  const [selectedDistricts, setSelectedDistricts] = useState([]);
+  const [selectedYears, setSelectedYears] = useState([]);
+  const [segmentFilter, setSegmentFilter] = useState('All');
+  const [typeFilter, setTypeFilter] = useState('All');
+  const [tenureFilter, setTenureFilter] = useState('All');
+  const [projectFilter, setProjectFilter] = useState('All');
+  const [projectSearch, setProjectSearch] = useState('');
+  const [showProjectDropdown, setShowProjectDropdown] = useState(false);
+  const [showDistrictPanel, setShowDistrictPanel] = useState(false);
+  const [showYearPanel, setShowYearPanel] = useState(false);
+  const [activeTab, setActiveTab] = useState('overview');
+  const [heatmapMetric, setHeatmapMetric] = useState('psf');
+  const [showDiff, setShowDiff] = useState(false);
+  const [rentalBedroom, setRentalBedroom] = useState('All');
+
+  // Analysis state
+  const [analyzeProject, setAnalyzeProject] = useState('');
+  const [analyzeSearch, setAnalyzeSearch] = useState('');
+  const [showAnalyzeDD, setShowAnalyzeDD] = useState(false);
+  const [analyzeTab, setAnalyzeTab] = useState('overview');
+  const [pricingArea, setPricingArea] = useState('');
+  const [pricingFloor, setPricingFloor] = useState('');
+
+  // Load data from API
+  useEffect(() => {
+    async function loadData() {
+      try {
+        setLoading(true);
+        setError(null);
+        const txns = await getTransactions();
+        setAllTransactions(txns);
+      } catch (err) {
+        console.error('Failed to load data:', err);
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+    loadData();
+  }, []);
+
+  // Load rental data when rental tab is first opened
+  useEffect(() => {
+    if (activeTab === 'rental' && allRentals.length === 0 && !rentalLoading) {
+      async function loadRentals() {
+        try {
+          setRentalLoading(true);
+          const rentals = await getRentals();
+          setAllRentals(rentals);
+          console.log(`Loaded ${rentals.length} rental records`);
+        } catch (err) {
+          console.error('Failed to load rentals:', err);
+        } finally {
+          setRentalLoading(false);
+        }
+      }
+      loadRentals();
+    }
+  }, [activeTab]);
+
+  // Derived filter options
+  const allYears = useMemo(() => [...new Set(allTransactions.map(t => t.year))].sort(), [allTransactions]);
+  const districts = useMemo(() => [...new Set(allTransactions.map(t => t.district))].sort(), [allTransactions]);
+  const segments = ['All', 'CCR', 'RCR', 'OCR'];
+  const types = useMemo(() => ['All', ...new Set(allTransactions.map(t => t.propertyType))], [allTransactions]);
+  const tenures = useMemo(() => ['All', ...new Set(allTransactions.map(t => t.tenure))], [allTransactions]);
+  const projects = useMemo(() => ['All', ...new Set(allTransactions.map(t => t.project))].sort(), [allTransactions]);
+
+  const filteredProjects = useMemo(() => {
+    if (!projectSearch.trim()) return projects;
+    const q = projectSearch.toLowerCase();
+    return projects.filter(p => p === 'All' || p.toLowerCase().includes(q));
+  }, [projects, projectSearch]);
+
+  const toggleDistrict = (d) => setSelectedDistricts(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d]);
+  const toggleYear = (y) => setSelectedYears(prev => prev.includes(y) ? prev.filter(x => x !== y) : [...prev, y]);
+
+  const normalizeTenure = (tenure) => {
+    if (!tenure) return 'Leasehold';
+    const t = tenure.toLowerCase();
+    if (t === 'fh' || t === 'freehold' || t.includes('freehold')) return 'Freehold';
+    return 'Leasehold';
+  };
+
+  const filtered = useMemo(() => {
+    return allTransactions.filter(t =>
+      (selectedDistricts.length === 0 || selectedDistricts.includes(t.district)) &&
+      (selectedYears.length === 0 || selectedYears.includes(t.year)) &&
+      (segmentFilter === 'All' || t.marketSegment === segmentFilter) &&
+      (typeFilter === 'All' || t.propertyType === typeFilter) &&
+      (tenureFilter === 'All' || t.tenure === tenureFilter) &&
+      (projectFilter === 'All' || t.project === projectFilter)
+    );
+  }, [allTransactions, selectedDistricts, selectedYears, segmentFilter, typeFilter, tenureFilter, projectFilter]);
+
+  const yearRangeLabel = useMemo(() => {
+    if (selectedYears.length === 0 && allYears.length > 0) return `${allYears[0]}–${allYears[allYears.length - 1]}`;
+    const sorted = [...selectedYears].sort();
+    if (sorted.length === 1) return `${sorted[0]}`;
+    return sorted.length > 0 ? `${sorted[0]}–${sorted[sorted.length - 1]}` : 'All';
+  }, [selectedYears, allYears]);
+
+  const latestFilteredYear = useMemo(() => {
+    if (!filtered.length) return null;
+    return Math.max(...filtered.map(t => t.year));
+  }, [filtered]);
+
+  // ===== COMPUTED DATA =====
+  const stats = useMemo(() => {
+    if (!filtered.length) return { count: 0, totalVol: 0, avgPrice: 0, avgPsf: 0, medianPsf: 0, minPsf: 0, maxPsf: 0 };
+    const psfs = filtered.map(t => t.psf).sort((a, b) => a - b);
+    return {
+      count: filtered.length,
+      totalVol: filtered.reduce((s, t) => s + t.priceNum, 0),
+      avgPrice: filtered.reduce((s, t) => s + t.priceNum, 0) / filtered.length,
+      avgPsf: filtered.reduce((s, t) => s + t.psf, 0) / filtered.length,
+      medianPsf: psfs[Math.floor(psfs.length / 2)],
+      minPsf: psfs[0],
+      maxPsf: psfs[psfs.length - 1],
+    };
+  }, [filtered]);
+
+  const districtTrendData = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => {
+      if (!map[t.contractDate]) map[t.contractDate] = {};
+      if (!map[t.contractDate][t.district]) map[t.contractDate][t.district] = [];
+      map[t.contractDate][t.district].push(t.psf);
+    });
+    return Object.entries(map).sort(([a],[b]) => a.localeCompare(b)).map(([date, dists]) => {
+      const row = { date };
+      Object.entries(dists).forEach(([d, vals]) => { row[`D${d}`] = Math.round((vals.reduce((s,v) => s+v, 0) / vals.length) * 100) / 100; });
+      return row;
+    });
+  }, [filtered]);
+
+  const activeDistricts = useMemo(() => { const s = new Set(); filtered.forEach(t => s.add(t.district)); return [...s].sort(); }, [filtered]);
+
+  const yoyData = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => { if (!map[t.year]) map[t.year] = []; map[t.year].push(t.psf); });
+    const years = Object.keys(map).sort();
+    return years.map((y, i) => {
+      const avg = map[y].reduce((s,v) => s+v, 0) / map[y].length;
+      const prevAvg = i > 0 ? map[years[i-1]].reduce((s,v) => s+v, 0) / map[years[i-1]].length : null;
+      return { year: y, avgPsf: Math.round(avg * 100) / 100, count: map[y].length, change: prevAvg ? Math.round(((avg - prevAvg) / prevAvg) * 10000) / 100 : null };
+    });
+  }, [filtered]);
+
+  const segmentData = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => { if (!map[t.marketSegment]) map[t.marketSegment] = { psfs: [], count: 0 }; map[t.marketSegment].psfs.push(t.psf); map[t.marketSegment].count++; });
+    return Object.entries(map).map(([seg, d]) => ({ name: seg, avgPsf: Math.round((d.psfs.reduce((s,v) => s+v, 0) / d.psfs.length) * 100) / 100, count: d.count }));
+  }, [filtered]);
+
+  const scatterData = useMemo(() => {
+    return ['CCR', 'RCR', 'OCR'].map(seg => ({ segment: seg, data: filtered.filter(t => t.marketSegment === seg).slice(0, 200).map(t => ({ area: Math.round(t.areaSqft), psf: t.psf, price: t.priceNum, project: t.project })) }));
+  }, [filtered]);
+
+  const psfDistribution = useMemo(() => {
+    const buckets = {};
+    filtered.forEach(t => { const bucket = Math.floor(t.psf / 500) * 500; buckets[bucket] = (buckets[bucket] || 0) + 1; });
+    return Object.entries(buckets).sort(([a],[b]) => Number(a) - Number(b)).map(([b, c]) => ({ range: `$${Number(b).toLocaleString()}-${(Number(b)+499).toLocaleString()}`, count: c }));
+  }, [filtered]);
+
+  const cumulativeData = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => { map[t.contractDate] = (map[t.contractDate] || 0) + t.priceNum; });
+    let cum = 0;
+    return Object.entries(map).sort(([a],[b]) => a.localeCompare(b)).map(([date, vol]) => { cum += vol; return { date, volume: vol, cumulative: cum }; });
+  }, [filtered]);
+
+  const typeAnalysis = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => { if (!map[t.propertyType]) map[t.propertyType] = { psfs: [], count: 0 }; map[t.propertyType].psfs.push(t.psf); map[t.propertyType].count++; });
+    return Object.entries(map).map(([type, d]) => ({ name: type, avgPsf: Math.round((d.psfs.reduce((s,v) => s+v, 0) / d.psfs.length) * 100) / 100, count: d.count }));
+  }, [filtered]);
+
+  const tenureAnalysis = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => { const ten = normalizeTenure(t.tenure); if (!map[ten]) map[ten] = { psfs: [], count: 0 }; map[ten].psfs.push(t.psf); map[ten].count++; });
+    return Object.entries(map).map(([ten, d]) => ({ name: ten, avgPsf: Math.round((d.psfs.reduce((s,v) => s+v, 0) / d.psfs.length) * 100) / 100, count: d.count }));
+  }, [filtered]);
+
+  const floorPremium = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => { if (!map[t.floorRange]) map[t.floorRange] = []; map[t.floorRange].push(t.psf); });
+    const floors = ["01-05","06-10","11-15","16-20","21-25","26-30","31-35","36-40","41-45","46-50","51-55","56-60"];
+    let prev = null;
+    return floors.filter(f => map[f]).map(f => {
+      const avg = map[f].reduce((s,v) => s+v, 0) / map[f].length;
+      const premDollar = prev ? avg - prev : 0;
+      const premPct = prev ? ((avg - prev) / prev) * 100 : 0;
+      prev = avg;
+      return { floor: f, avgPsf: Math.round(avg * 100) / 100, count: map[f].length, premiumDollar: Math.round(premDollar * 100) / 100, premiumPct: Math.round(premPct * 100) / 100 };
+    });
+  }, [filtered]);
+
+  const topProjects = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => { if (!map[t.project]) map[t.project] = { count: 0, totalVol: 0, psfs: [] }; map[t.project].count++; map[t.project].totalVol += t.priceNum; map[t.project].psfs.push(t.psf); });
+    return Object.entries(map).map(([name, d]) => ({ name: name.length > 22 ? name.substring(0,22) + '\u2026' : name, fullName: name, count: d.count, volume: d.totalVol, avgPsf: Math.round((d.psfs.reduce((s,v) => s+v, 0) / d.psfs.length) * 100) / 100 })).sort((a, b) => b.count - a.count).slice(0, 10);
+  }, [filtered]);
+
+  const districtYoY = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => { const key = `${t.district}-${t.year}`; if (!map[key]) map[key] = { district: t.district, year: t.year, psfs: [] }; map[key].psfs.push(t.psf); });
+    const yearMap = {};
+    Object.values(map).forEach(d => { if (!yearMap[d.year]) yearMap[d.year] = {}; yearMap[d.year][`D${d.district}`] = Math.round((d.psfs.reduce((s,v) => s+v, 0) / d.psfs.length) * 100) / 100; });
+    return Object.entries(yearMap).sort(([a],[b]) => a.localeCompare(b)).map(([year, dists]) => ({ year, ...dists }));
+  }, [filtered]);
+
+  // ===== RENTAL COMPUTED DATA =====
+  const filteredRentals = useMemo(() => {
+    return allRentals.filter(r =>
+      (selectedDistricts.length === 0 || selectedDistricts.includes(r.district)) &&
+      (rentalBedroom === 'All' || r.noOfBedRoom === rentalBedroom)
+    );
+  }, [allRentals, selectedDistricts, rentalBedroom]);
+
+  const rentalBedrooms = useMemo(() => ['All', ...new Set(allRentals.map(r => r.noOfBedRoom).filter(Boolean))].sort(), [allRentals]);
+
+  const parseAreaMid = (areaSqft) => {
+    if (!areaSqft) return 0;
+    const parts = areaSqft.split('-').map(s => parseFloat(s.trim()));
+    if (parts.length === 2 && parts[0] > 0 && parts[1] > 0) return (parts[0] + parts[1]) / 2;
+    return parts[0] || 0;
+  };
+
+  const parseLeaseQuarter = (ld) => {
+    if (!ld || ld.length !== 4) return null;
+    const mm = parseInt(ld.substring(0, 2));
+    const yy = parseInt(ld.substring(2, 4));
+    const year = yy > 50 ? 1900 + yy : 2000 + yy;
+    const q = Math.ceil(mm / 3);
+    return { label: `${year} Q${q}`, year, quarter: q, sortKey: year * 10 + q };
+  };
+
+  const rentalStats = useMemo(() => {
+    if (!filteredRentals.length) return { count: 0, avgRent: 0, medianRent: 0, avgRentPsf: 0 };
+    const rents = filteredRentals.map(r => r.rent).sort((a,b) => a-b);
+    const rentPsfs = filteredRentals.map(r => { const mid = parseAreaMid(r.areaSqft); return mid > 0 ? r.rent / mid : 0; }).filter(v => v > 0);
+    return {
+      count: filteredRentals.length,
+      avgRent: Math.round(rents.reduce((s,v) => s+v, 0) / rents.length),
+      medianRent: rents[Math.floor(rents.length / 2)],
+      avgRentPsf: rentPsfs.length ? Math.round((rentPsfs.reduce((s,v) => s+v, 0) / rentPsfs.length) * 100) / 100 : 0,
+    };
+  }, [filteredRentals]);
+
+  const rentalTrend = useMemo(() => {
+    const map = {};
+    filteredRentals.forEach(r => {
+      const q = parseLeaseQuarter(r.leaseDate);
+      if (!q) return;
+      if (!map[q.sortKey]) map[q.sortKey] = { label: q.label, rents: [], sortKey: q.sortKey };
+      map[q.sortKey].rents.push(r.rent);
+    });
+    return Object.values(map).sort((a,b) => a.sortKey - b.sortKey).map(q => ({
+      quarter: q.label,
+      avgRent: Math.round(q.rents.reduce((s,v) => s+v, 0) / q.rents.length),
+      count: q.rents.length,
+    }));
+  }, [filteredRentals]);
+
+  const rentalByDistrict = useMemo(() => {
+    const map = {};
+    filteredRentals.forEach(r => {
+      if (!map[r.district]) map[r.district] = { rents: [], count: 0 };
+      map[r.district].rents.push(r.rent);
+      map[r.district].count++;
+    });
+    return Object.entries(map).sort(([a],[b]) => a.localeCompare(b)).map(([d, v]) => ({
+      district: `D${d}`,
+      avgRent: Math.round(v.rents.reduce((s,r) => s+r, 0) / v.rents.length),
+      count: v.count,
+    }));
+  }, [filteredRentals]);
+
+  const rentalByBedroom = useMemo(() => {
+    const map = {};
+    filteredRentals.forEach(r => {
+      const bed = r.noOfBedRoom || 'N/A';
+      if (!map[bed]) map[bed] = { rents: [], count: 0 };
+      map[bed].rents.push(r.rent);
+      map[bed].count++;
+    });
+    return Object.entries(map).sort(([a],[b]) => { if (a === 'N/A') return 1; if (b === 'N/A') return -1; return a.localeCompare(b); }).map(([bed, v]) => ({
+      bedroom: bed === 'N/A' ? 'Unknown' : `${bed} BR`,
+      avgRent: Math.round(v.rents.reduce((s,r) => s+r, 0) / v.rents.length),
+      count: v.count,
+    }));
+  }, [filteredRentals]);
+
+  const rentalPsfByDistrict = useMemo(() => {
+    const map = {};
+    filteredRentals.forEach(r => {
+      const mid = parseAreaMid(r.areaSqft);
+      if (mid <= 0) return;
+      const rentPsf = r.rent / mid;
+      if (!map[r.district]) map[r.district] = { psfs: [], count: 0 };
+      map[r.district].psfs.push(rentPsf);
+      map[r.district].count++;
+    });
+    return Object.entries(map).sort(([a],[b]) => a.localeCompare(b)).map(([d, v]) => ({
+      district: `D${d}`,
+      rentPsf: Math.round((v.psfs.reduce((s,r) => s+r, 0) / v.psfs.length) * 100) / 100,
+      count: v.count,
+    }));
+  }, [filteredRentals]);
+
+  const rentalYield = useMemo(() => {
+    if (!filteredRentals.length || !filtered.length) return [];
+    const rentMap = {};
+    filteredRentals.forEach(r => {
+      const mid = parseAreaMid(r.areaSqft);
+      if (mid <= 0) return;
+      if (!rentMap[r.district]) rentMap[r.district] = [];
+      rentMap[r.district].push(r.rent / mid);
+    });
+    const buyMap = {};
+    filtered.forEach(t => {
+      if (!buyMap[t.district]) buyMap[t.district] = [];
+      buyMap[t.district].push(t.psf);
+    });
+    const results = [];
+    Object.keys(rentMap).forEach(d => {
+      if (!buyMap[d]) return;
+      const avgRentPsf = rentMap[d].reduce((s,v) => s+v, 0) / rentMap[d].length;
+      const avgBuyPsf = buyMap[d].reduce((s,v) => s+v, 0) / buyMap[d].length;
+      if (avgBuyPsf <= 0) return;
+      const annualYield = (avgRentPsf * 12 / avgBuyPsf) * 100;
+      results.push({
+        district: `D${d}`,
+        rentPsf: Math.round(avgRentPsf * 100) / 100,
+        buyPsf: Math.round(avgBuyPsf),
+        yield: Math.round(annualYield * 100) / 100,
+      });
+    });
+    return results.sort((a,b) => b.yield - a.yield);
+  }, [filteredRentals, filtered]);
+
+  const rentalDistrictTrend = useMemo(() => {
+    const map = {};
+    filteredRentals.forEach(r => {
+      const q = parseLeaseQuarter(r.leaseDate);
+      if (!q) return;
+      const key = q.sortKey;
+      if (!map[key]) map[key] = { label: q.label, sortKey: q.sortKey, districts: {} };
+      if (!map[key].districts[r.district]) map[key].districts[r.district] = [];
+      map[key].districts[r.district].push(r.rent);
+    });
+    return Object.values(map).sort((a,b) => a.sortKey - b.sortKey).map(q => {
+      const row = { quarter: q.label };
+      Object.entries(q.districts).forEach(([d, rents]) => { row[`D${d}`] = Math.round(rents.reduce((s,v) => s+v, 0) / rents.length); });
+      return row;
+    });
+  }, [filteredRentals]);
+
+  const activeRentalDistricts = useMemo(() => { const s = new Set(); filteredRentals.forEach(r => s.add(r.district)); return [...s].sort(); }, [filteredRentals]);
+
+  // ===== ANALYSIS COMPUTED DATA =====
+  const analyzeFilteredProjects = useMemo(() => {
+    if (!analyzeSearch.trim()) return [];
+    const q = analyzeSearch.toLowerCase();
+    return [...new Set(allTransactions.map(t => t.project))].filter(p => p.toLowerCase().includes(q)).sort().slice(0, 30);
+  }, [allTransactions, analyzeSearch]);
+
+  const projTx = useMemo(() => allTransactions.filter(t => t.project === analyzeProject), [allTransactions, analyzeProject]);
+  const projAreas = useMemo(() => [...new Set(projTx.map(t => t.areaSqft))].sort((a,b) => a - b), [projTx]);
+  const projLatestSaleYear = useMemo(() => projTx.length ? Math.max(...projTx.map(t => t.year)) : null, [projTx]);
+
+  const projInfo = useMemo(() => {
+    if (!projTx.length) return null;
+    const t = projTx[0];
+    return { district: t.district, segment: t.marketSegment, type: t.propertyType, tenure: t.tenure, street: t.street || '' };
+  }, [projTx]);
+
+  const projSaleStats = useMemo(() => {
+    if (!projTx.length) return null;
+    const psfs = projTx.map(t => t.psf).sort((a,b) => a - b);
+    return { count: projTx.length, avgPsf: Math.round((psfs.reduce((s,v) => s+v, 0) / psfs.length) * 100) / 100, medianPsf: psfs[Math.floor(psfs.length / 2)], minPsf: psfs[0], maxPsf: psfs[psfs.length - 1], totalVol: projTx.reduce((s,t) => s + t.priceNum, 0) };
+  }, [projTx]);
+
+  const projFloor = useMemo(() => {
+    const map = {};
+    projTx.forEach(t => { if (!map[t.floorRange]) map[t.floorRange] = []; map[t.floorRange].push(t.psf); });
+    const floors = ["01-05","06-10","11-15","16-20","21-25","26-30","31-35","36-40","41-45","46-50"];
+    const avgAll = projTx.length ? projTx.reduce((s,t) => s + t.psf, 0) / projTx.length : 0;
+    return floors.filter(f => map[f]).map(f => { const avg = map[f].reduce((s,v) => s+v,0) / map[f].length; return { floor: f, avgPsf: Math.round(avg*100)/100, count: map[f].length, premDollar: Math.round((avg - avgAll)*100)/100, premPct: avgAll ? Math.round(((avg - avgAll)/avgAll)*10000)/100 : 0 }; });
+  }, [projTx]);
+
+  const projFloorDetail = useMemo(() => {
+    const map = {};
+    projTx.forEach(t => { if (!map[t.floorRange]) map[t.floorRange] = { allCount: 0, latCount: 0 }; map[t.floorRange].allCount++; if (t.year === projLatestSaleYear) map[t.floorRange].latCount++; });
+    return Object.entries(map).sort(([a],[b]) => a.localeCompare(b)).map(([f,d]) => ({ floor: f, ...d }));
+  }, [projTx, projLatestSaleYear]);
+
+  const projComparison = useMemo(() => {
+    if (!projInfo) return [];
+    const map = {};
+    allTransactions.forEach(t => {
+      if (!map[t.contractDate]) map[t.contractDate] = { project: [], district: [], segment: [] };
+      if (t.project === analyzeProject) map[t.contractDate].project.push(t.psf);
+      if (t.district === projInfo.district) map[t.contractDate].district.push(t.psf);
+      if (t.marketSegment === projInfo.segment) map[t.contractDate].segment.push(t.psf);
+    });
+    return Object.entries(map).sort(([a],[b]) => a.localeCompare(b)).map(([date, d]) => ({
+      date,
+      project: d.project.length ? Math.round((d.project.reduce((s,v) => s+v,0) / d.project.length)*100)/100 : null,
+      district: d.district.length ? Math.round((d.district.reduce((s,v) => s+v,0) / d.district.length)*100)/100 : null,
+      segment: d.segment.length ? Math.round((d.segment.reduce((s,v) => s+v,0) / d.segment.length)*100)/100 : null,
+    }));
+  }, [allTransactions, analyzeProject, projInfo]);
+
+  const projScatter = useMemo(() => projTx.map(t => ({ area: Math.round(t.areaSqft), psf: t.psf, price: t.priceNum, floor: t.floorRange, date: t.contractDate })), [projTx]);
+
+  const nearbyProjects = useMemo(() => {
+    if (!projInfo) return [];
+    const map = {};
+    allTransactions.filter(t => t.district === projInfo.district && t.project !== analyzeProject).forEach(t => { if (!map[t.project]) map[t.project] = { count: 0, psfs: [] }; map[t.project].count++; map[t.project].psfs.push(t.psf); });
+    return Object.entries(map).map(([n,d]) => ({ name: n, count: d.count, avgPsf: Math.round((d.psfs.reduce((s,v) => s+v,0) / d.psfs.length)*100)/100 })).sort((a,b) => b.count - a.count).slice(0, 8);
+  }, [allTransactions, analyzeProject, projInfo]);
+
+  // ===== HELPERS =====
+  const tabs = [
+    { id: 'overview', label: '\ud83d\udcca Overview' },
+    { id: 'districts', label: '\ud83d\udccd Districts' },
+    { id: 'advanced', label: '\ud83d\udcc8 Advanced' },
+    { id: 'floor', label: '\ud83c\udfe2 Floor Analysis' },
+    { id: 'rental', label: '\ud83c\udfe0 Rental' },
+    { id: 'analyze', label: '\ud83d\udd0d Analysis' },
+  ];
+  const formatCurrency = (v) => `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  const formatCompactNumber = (v) => { const abs = Math.abs(v); const sign = v < 0 ? '-' : ''; if (abs >= 1e6) return `${sign}${(abs/1e6).toFixed(2)}M`; if (abs >= 1e3) return `${sign}${(abs/1e3).toFixed(0)}K`; return `${sign}${Math.round(abs)}`; };
+  
+  const getHeatmapColor = (val, min, max) => { if (max === min) return 'rgba(14,165,233,0.3)'; const ratio = (val - min) / (max - min); return `rgba(14,165,233,${0.1 + ratio * 0.8})`; };
+  const getHeatmapTextColor = (val, min, max) => { if (max === min) return '#e2e8f0'; return ((val - min) / (max - min)) > 0.6 ? '#ffffff' : '#cbd5e1'; };
+  const getDiffColor = (diff, minD, maxD) => { if (diff === 0) return 'rgba(241,245,249,0.3)'; if (diff > 0) { const r = maxD === 0 ? 0.5 : Math.min(diff / maxD, 1); return `rgba(34,197,94,${0.1 + r * 0.6})`; } else { const r = minD === 0 ? 0.5 : Math.min(Math.abs(diff) / Math.abs(minD), 1); return `rgba(239,68,68,${0.1 + r * 0.6})`; } };
+  const getDiffTextColor = (diff, minD, maxD) => { if (diff > 0) { return (maxD === 0 ? 0.5 : Math.min(diff / maxD, 1)) > 0.5 ? '#ffffff' : '#4ade80'; } else { return (minD === 0 ? 0.5 : Math.min(Math.abs(diff) / Math.abs(minD), 1)) > 0.5 ? '#ffffff' : '#f87171'; } };
+
+  // Heatmap matrix
+  const matrixData = useMemo(() => {
+    const map = new Map();
+    const floorOrder = ["01-05","06-10","11-15","16-20","21-25","26-30","31-35","36-40","41-45","46-50","51-55","56-60"];
+    const yearSet = new Set(); const floorSet = new Set();
+    filtered.forEach(t => { const key = `${t.floorRange}-${t.year}`; yearSet.add(t.year); floorSet.add(t.floorRange); if (!map.has(key)) map.set(key, { totalPsf: 0, totalPrice: 0, count: 0 }); const cell = map.get(key); cell.totalPsf += t.psf; cell.totalPrice += t.priceNum; cell.count++; });
+    const cols = [...yearSet].sort(); const rows = floorOrder.filter(f => floorSet.has(f));
+    let minPsf = Infinity, maxPsf = -Infinity, minPrice = Infinity, maxPrice = -Infinity, minVol = Infinity, maxVol = -Infinity;
+    map.forEach(cell => { const ap = cell.totalPsf / cell.count; const apr = cell.totalPrice / cell.count; minPsf = Math.min(minPsf, ap); maxPsf = Math.max(maxPsf, ap); minPrice = Math.min(minPrice, apr); maxPrice = Math.max(maxPrice, apr); minVol = Math.min(minVol, cell.count); maxVol = Math.max(maxVol, cell.count); });
+    const diffMap = new Map(); let minDiffPsf = 0, maxDiffPsf = 0, minDiffPrice = 0, maxDiffPrice = 0, minDiffVol = 0, maxDiffVol = 0;
+    rows.forEach(floor => { cols.forEach((year, yi) => { const key = `${floor}-${year}`; if (yi === 0) { diffMap.set(key, { isBase: true }); } else { const cell = map.get(key); const prevCell = map.get(`${floor}-${cols[yi-1]}`); if (cell && prevCell) { const dp = (cell.totalPsf/cell.count) - (prevCell.totalPsf/prevCell.count); const dpr = (cell.totalPrice/cell.count) - (prevCell.totalPrice/prevCell.count); const dv = cell.count - prevCell.count; diffMap.set(key, { isBase: false, diffPsf: dp, diffPrice: dpr, diffVol: dv }); minDiffPsf = Math.min(minDiffPsf, dp); maxDiffPsf = Math.max(maxDiffPsf, dp); minDiffPrice = Math.min(minDiffPrice, dpr); maxDiffPrice = Math.max(maxDiffPrice, dpr); minDiffVol = Math.min(minDiffVol, dv); maxDiffVol = Math.max(maxDiffVol, dv); } else { diffMap.set(key, { isBase: false }); } } }); });
+    const computeRowStats = (getValue) => { const sm = new Map(); rows.forEach(floor => { const vals = []; cols.forEach(yr => { const c = map.get(`${floor}-${yr}`); if (c) vals.push(getValue(c)); }); if (vals.length < 2) { sm.set(floor, { avgIncrement: 0, avgPercChange: 0, totalChangeVal: 0, totalChangePerc: 0 }); } else { const inc = []; const pc = []; for (let i = 1; i < vals.length; i++) { inc.push(vals[i]-vals[i-1]); if (vals[i-1] !== 0) pc.push(((vals[i]-vals[i-1])/vals[i-1])*100); } sm.set(floor, { avgIncrement: inc.length ? inc.reduce((s,v)=>s+v,0)/inc.length : 0, avgPercChange: pc.length ? pc.reduce((s,v)=>s+v,0)/pc.length : 0, totalChangeVal: vals[vals.length-1]-vals[0], totalChangePerc: vals[0] !== 0 ? ((vals[vals.length-1]-vals[0])/vals[0])*100 : 0 }); } }); return sm; };
+    return { map, diffMap, cols, rows, minPsf, maxPsf, minPrice, maxPrice, minVol, maxVol, minDiffPsf, maxDiffPsf, minDiffPrice, maxDiffPrice, minDiffVol, maxDiffVol, rowStatsPsf: computeRowStats(c => c.totalPsf/c.count), rowStatsPrice: computeRowStats(c => c.totalPrice/c.count), rowStatsVol: computeRowStats(c => c.count) };
+  }, [filtered]);
+
+  // ===== LOADING / ERROR STATES =====
+  if (loading) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
+        <div style={{ width: 48, height: 48, border: '3px solid rgba(56,189,248,0.2)', borderTopColor: '#38bdf8', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+        <p style={{ color: '#94a3b8', fontSize: 14 }}>Loading URA transaction data...</p>
+        <p style={{ color: '#475569', fontSize: 12 }}>Fetching from all batches</p>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, padding: 40 }}>
+        <div style={{ fontSize: 48 }}>{'\u26a0\ufe0f'}</div>
+        <h2 style={{ color: '#f87171', fontSize: 18, fontWeight: 600 }}>Failed to Load Data</h2>
+        <p style={{ color: '#94a3b8', fontSize: 13, textAlign: 'center', maxWidth: 400 }}>{error}</p>
+        <button onClick={() => window.location.reload()} style={{ background: '#38bdf8', color: '#0f172a', border: 'none', borderRadius: 8, padding: '10px 24px', fontWeight: 600, cursor: cp }}>Retry</button>
+      </div>
+    );
+  }
+
+  // ===== RENDER =====
+  const bs = { background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '6px 12px', color: '#e2e8f0', fontSize: 12, cursor: cp, outline: 'none' };
+  const cardStyle = { background: 'rgba(255,255,255,0.04)', borderRadius: 14, padding: 20, border: '1px solid rgba(255,255,255,0.06)' };
+  const thStyle = { color: '#94a3b8', fontWeight: 500, padding: '10px 12px', textAlign: 'left', fontSize: 11 };
+  const tdStyle = { padding: '10px 12px' };
+
+  return (
+    <div style={{ minHeight: '100vh' }}>
+      {/* Header */}
+      <div style={{ padding: '24px 28px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <div>
+            <h1 style={{ color: '#f1f5f9', fontSize: 26, fontWeight: 700, margin: 0, letterSpacing: '-0.5px' }}><span style={{ color: '#38bdf8' }}>URA</span> Property Analytics</h1>
+            <p style={{ color: '#64748b', fontSize: 13, marginTop: 4 }}>Singapore Private Residential Transactions {'\u2022'} {allTransactions.length.toLocaleString()} records</p>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <span style={{ background: '#22c55e', width: 8, height: 8, borderRadius: '50%', display: 'inline-block' }} />
+            <span style={{ color: '#94a3b8', fontSize: 12 }}>Live Data</span>
+          </div>
+        </div>
+
+        {/* Click-away overlay */}
+        {(showDistrictPanel || showProjectDropdown || showYearPanel || showAnalyzeDD) && (
+          <div onClick={() => { setShowDistrictPanel(false); setShowProjectDropdown(false); setShowYearPanel(false); setShowAnalyzeDD(false); }} style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 40 }} />
+        )}
+
+        {/* Filters */}
+        <div style={{ display: 'flex', gap: 10, marginTop: 16, flexWrap: 'wrap', alignItems: 'flex-start', position: 'relative', zIndex: 45 }}>
+          {/* District Checkbox */}
+          <div style={{ position: 'relative' }}>
+            <button onClick={() => { setShowDistrictPanel(!showDistrictPanel); setShowProjectDropdown(false); setShowYearPanel(false); }} style={{ ...bs, minWidth: 140, textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <span>District: {selectedDistricts.length === 0 ? 'All' : selectedDistricts.length === 1 ? `D${selectedDistricts[0]}` : `${selectedDistricts.length} selected`}</span>
+              <span style={{ fontSize: 10, opacity: 0.6 }}>{'\u25bc'}</span>
+            </button>
+            {showDistrictPanel && (
+              <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: 4, background: '#1e293b', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: 12, zIndex: 50, width: 280, maxHeight: 320, overflowY: 'auto', boxShadow: '0 12px 40px rgba(0,0,0,0.5)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, paddingBottom: 8, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                  <span style={{ color: '#94a3b8', fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>Districts</span>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button onClick={() => setSelectedDistricts([...districts])} style={{ background: 'rgba(56,189,248,0.15)', border: '1px solid rgba(56,189,248,0.3)', borderRadius: 5, padding: '2px 8px', color: '#38bdf8', fontSize: 10, cursor: cp, fontWeight: 500 }}>All</button>
+                    <button onClick={() => setSelectedDistricts([])} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 5, padding: '2px 8px', color: '#94a3b8', fontSize: 10, cursor: cp, fontWeight: 500 }}>Clear</button>
+                  </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 2 }}>
+                  {districts.map(d => (
+                    <label key={d} onClick={() => toggleDistrict(d)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 6px', borderRadius: 6, cursor: cp, background: selectedDistricts.includes(d) ? 'rgba(56,189,248,0.08)' : 'transparent' }}>
+                      <div style={{ width: 16, height: 16, borderRadius: 4, flexShrink: 0, border: selectedDistricts.includes(d) ? '2px solid #38bdf8' : '2px solid rgba(255,255,255,0.2)', background: selectedDistricts.includes(d) ? '#38bdf8' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                        {selectedDistricts.includes(d) && <span style={{ color: '#0f172a', fontSize: 10, fontWeight: 700 }}>{'\u2713'}</span>}
+                      </div>
+                      <span style={{ color: selectedDistricts.includes(d) ? '#e2e8f0' : '#94a3b8', fontSize: 12 }}>D{d}</span>
+                    </label>
+                  ))}
+                </div>
+                <button onClick={() => setShowDistrictPanel(false)} style={{ width: '100%', marginTop: 10, padding: '6px 0', background: 'rgba(56,189,248,0.15)', border: '1px solid rgba(56,189,248,0.3)', borderRadius: 6, color: '#38bdf8', fontSize: 11, fontWeight: 600, cursor: cp }}>Done</button>
+              </div>
+            )}
+          </div>
+
+          {/* Year Checkbox */}
+          <div style={{ position: 'relative' }}>
+            <button onClick={() => { setShowYearPanel(!showYearPanel); setShowDistrictPanel(false); setShowProjectDropdown(false); }} style={{ ...bs, minWidth: 130, textAlign: 'left', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+              <span>Year: {selectedYears.length === 0 ? 'All' : selectedYears.length === 1 ? selectedYears[0] : `${selectedYears.length} selected`}</span>
+              <span style={{ fontSize: 10, opacity: 0.6 }}>{'\u25bc'}</span>
+            </button>
+            {showYearPanel && (
+              <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: 4, background: '#1e293b', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: 12, zIndex: 50, width: 200, boxShadow: '0 12px 40px rgba(0,0,0,0.5)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, paddingBottom: 8, borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                  <span style={{ color: '#94a3b8', fontSize: 11, fontWeight: 600, textTransform: 'uppercase' }}>Years</span>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button onClick={() => setSelectedYears([...allYears])} style={{ background: 'rgba(56,189,248,0.15)', border: '1px solid rgba(56,189,248,0.3)', borderRadius: 5, padding: '2px 8px', color: '#38bdf8', fontSize: 10, cursor: cp, fontWeight: 500 }}>All</button>
+                    <button onClick={() => setSelectedYears([])} style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 5, padding: '2px 8px', color: '#94a3b8', fontSize: 10, cursor: cp, fontWeight: 500 }}>Clear</button>
+                    <button onClick={() => setSelectedYears([allYears[allYears.length - 1]])} style={{ background: 'rgba(52,211,153,0.15)', border: '1px solid rgba(52,211,153,0.3)', borderRadius: 5, padding: '2px 8px', color: '#34d399', fontSize: 10, cursor: cp, fontWeight: 500 }}>Latest</button>
+                  </div>
+                </div>
+                {allYears.map(y => (
+                  <label key={y} onClick={() => toggleYear(y)} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 6px', borderRadius: 6, cursor: cp, background: selectedYears.includes(y) ? 'rgba(56,189,248,0.08)' : 'transparent' }}>
+                    <div style={{ width: 16, height: 16, borderRadius: 4, border: selectedYears.includes(y) ? '2px solid #38bdf8' : '2px solid rgba(255,255,255,0.2)', background: selectedYears.includes(y) ? '#38bdf8' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {selectedYears.includes(y) && <span style={{ color: '#0f172a', fontSize: 10, fontWeight: 700 }}>{'\u2713'}</span>}
+                    </div>
+                    <span style={{ color: selectedYears.includes(y) ? '#e2e8f0' : '#94a3b8', fontSize: 12 }}>{y}</span>
+                  </label>
+                ))}
+                <button onClick={() => setShowYearPanel(false)} style={{ width: '100%', marginTop: 10, padding: '6px 0', background: 'rgba(56,189,248,0.15)', border: '1px solid rgba(56,189,248,0.3)', borderRadius: 6, color: '#38bdf8', fontSize: 11, fontWeight: 600, cursor: cp }}>Done</button>
+              </div>
+            )}
+          </div>
+
+          {/* Segment, Type, Tenure */}
+          {[{ label: 'Segment', value: segmentFilter, set: setSegmentFilter, opts: segments }, { label: 'Type', value: typeFilter, set: setTypeFilter, opts: types }, { label: 'Tenure', value: tenureFilter, set: setTenureFilter, opts: tenures }].map(f => (
+            <select key={f.label} value={f.value} onChange={e => f.set(e.target.value)} style={{ ...bs, minWidth: 100 }}>
+              {f.opts.map(o => <option key={o} value={o}>{f.label}: {o}</option>)}
+            </select>
+          ))}
+
+          {/* Searchable Project */}
+          <div style={{ position: 'relative', minWidth: 240 }}>
+            <div onClick={() => { setShowProjectDropdown(!showProjectDropdown); setShowDistrictPanel(false); setShowYearPanel(false); }} style={{ ...bs, padding: '0px 4px', display: 'flex', alignItems: 'center' }}>
+              <span style={{ color: '#64748b', fontSize: 12, padding: '6px 8px', flexShrink: 0 }}>{'\ud83d\udd0d'}</span>
+              <input type="text" placeholder={projectFilter === 'All' ? `Project: All (${projects.length - 1})` : projectFilter} value={projectSearch}
+                onChange={e => { setProjectSearch(e.target.value); setShowProjectDropdown(true); }}
+                onFocus={() => { setShowProjectDropdown(true); setShowDistrictPanel(false); setShowYearPanel(false); }}
+                style={{ background: 'transparent', border: 'none', outline: 'none', color: '#e2e8f0', fontSize: 12, padding: '6px 4px', flex: 1, width: '100%', minWidth: 0 }} />
+              {projectFilter !== 'All' && <button onClick={(e) => { e.stopPropagation(); setProjectFilter('All'); setProjectSearch(''); }} style={{ background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 4, color: '#94a3b8', fontSize: 10, padding: '2px 6px', cursor: cp, flexShrink: 0, marginRight: 4 }}>{'\u2715'}</button>}
+            </div>
+            {showProjectDropdown && (
+              <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 4, background: '#1e293b', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, zIndex: 50, maxHeight: 280, overflowY: 'auto', boxShadow: '0 12px 40px rgba(0,0,0,0.5)' }}>
+                {filteredProjects.length === 0 ? <div style={{ padding: '16px 12px', color: '#64748b', fontSize: 12, textAlign: 'center' }}>No projects found</div> :
+                  filteredProjects.slice(0, 50).map(p => (
+                    <div key={p} onClick={() => { setProjectFilter(p); setProjectSearch(''); setShowProjectDropdown(false); }}
+                      style={{ padding: '8px 14px', fontSize: 12, cursor: cp, color: p === projectFilter ? '#38bdf8' : '#cbd5e1', background: p === projectFilter ? 'rgba(56,189,248,0.1)' : 'transparent', borderBottom: '1px solid rgba(255,255,255,0.04)' }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.06)'} onMouseLeave={e => e.currentTarget.style.background = p === projectFilter ? 'rgba(56,189,248,0.1)' : 'transparent'}>
+                      {p === 'All' ? `All Projects (${projects.length - 1})` : p}
+                    </div>
+                  ))
+                }
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Chips */}
+        {(selectedDistricts.length > 0 || selectedYears.length > 0) && (
+          <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span style={{ color: '#64748b', fontSize: 11, marginRight: 4 }}>Filtered:</span>
+            {selectedYears.sort((a,b)=>a-b).map(y => <span key={`y-${y}`} style={{ background: 'rgba(52,211,153,0.12)', border: '1px solid rgba(52,211,153,0.25)', borderRadius: 6, padding: '2px 8px', fontSize: 11, color: '#34d399', display: 'flex', alignItems: 'center', gap: 4 }}>{y}<span onClick={() => toggleYear(y)} style={{ cursor: cp, opacity: 0.7, fontSize: 10 }}>{'\u2715'}</span></span>)}
+            {selectedDistricts.sort().map(d => <span key={`d-${d}`} style={{ background: 'rgba(56,189,248,0.12)', border: '1px solid rgba(56,189,248,0.25)', borderRadius: 6, padding: '2px 8px', fontSize: 11, color: '#38bdf8', display: 'flex', alignItems: 'center', gap: 4 }}>D{d}<span onClick={() => toggleDistrict(d)} style={{ cursor: cp, opacity: 0.7, fontSize: 10 }}>{'\u2715'}</span></span>)}
+            <button onClick={() => { setSelectedDistricts([]); setSelectedYears([]); }} style={{ background: 'none', border: 'none', color: '#64748b', fontSize: 11, cursor: cp, textDecoration: 'underline' }}>Clear all</button>
+          </div>
+        )}
+
+        {/* Tabs */}
+        <div style={{ display: 'flex', gap: 4, marginTop: 16, flexWrap: 'wrap' }}>
+          {tabs.map(t => <button key={t.id} onClick={() => setActiveTab(t.id)} style={{ background: activeTab === t.id ? 'rgba(56,189,248,0.15)' : 'transparent', border: activeTab === t.id ? '1px solid rgba(56,189,248,0.3)' : '1px solid transparent', borderRadius: 8, padding: '8px 16px', color: activeTab === t.id ? '#38bdf8' : '#64748b', fontSize: 13, fontWeight: 500, cursor: cp, transition: 'all 0.2s' }}>{t.label}</button>)}
+        </div>
+      </div>
+
+      {/* Context bar */}
+      <div style={{ padding: '20px 28px 4px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <span style={{ color: '#64748b', fontSize: 11 }}>
+            Showing data for <span style={{ color: '#e2e8f0', fontWeight: 600 }}>{yearRangeLabel}</span>
+            {selectedDistricts.length > 0 && <> {'\u00b7'} <span style={{ color: '#38bdf8' }}>{selectedDistricts.length} district{selectedDistricts.length > 1 ? 's' : ''}</span></>}
+            {projectFilter !== 'All' && <> {'\u00b7'} <span style={{ color: '#a78bfa' }}>{projectFilter}</span></>}
+          </span>
+          <span style={{ color: '#475569', fontSize: 11 }}>{filtered.length.toLocaleString()} transactions</span>
+        </div>
+      </div>
+
+      {/* Stats Cards */}
+      <div style={{ padding: '0 28px 20px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+        {[
+          { label: 'Transactions', value: stats.count.toLocaleString(), color: '#38bdf8', icon: '\ud83d\udccb' },
+          { label: 'Total Volume', value: `$${(stats.totalVol / 1e9).toFixed(2)}B`, color: '#a78bfa', icon: '\ud83d\udcb0' },
+          { label: 'Avg Price', value: formatCurrency(Math.round(stats.avgPrice)), color: '#34d399', icon: '\ud83c\udff7\ufe0f' },
+          { label: 'Avg PSF', value: formatCurrency(stats.avgPsf), color: '#fb923c', icon: '\ud83d\udcd0' },
+          { label: 'Median PSF', value: formatCurrency(stats.medianPsf), color: '#f472b6', icon: '\ud83d\udcca' },
+          { label: 'PSF Range', value: `${formatCurrency(stats.minPsf)} \u2013 ${formatCurrency(stats.maxPsf)}`, color: '#94a3b8', icon: '\u2195\ufe0f', small: true },
+        ].map((s, i) => (
+          <div key={i} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 12, padding: '16px 18px', border: '1px solid rgba(255,255,255,0.06)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ color: '#64748b', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{s.label}</span>
+              <span style={{ fontSize: 16 }}>{s.icon}</span>
+            </div>
+            <div style={{ color: s.color, fontSize: s.small ? 14 : 20, fontWeight: 700, fontFamily: fm }}>{s.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Charts */}
+      <div style={{ padding: '0 28px 28px' }}>
+        {activeTab === 'overview' && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udcc8'} Year-over-Year PSF Analysis</h3><div style={{ height: 280 }}><ResponsiveContainer width="100%" height="100%"><ComposedChart data={yoyData}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="year" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} /><YAxis yAxisId="left" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><YAxis yAxisId="right" orientation="right" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `${v}%`} /><Tooltip content={<CustomTooltip />} /><Legend wrapperStyle={{ fontSize: 11, color: '#94a3b8' }} /><Bar yAxisId="left" dataKey="avgPsf" name="Avg PSF" fill="#6366f1" radius={[4,4,0,0]} barSize={32} /><Line yAxisId="right" dataKey="change" name="YoY %" stroke="#f59e0b" strokeWidth={2} dot={{ r: 4, fill: '#f59e0b' }} connectNulls /><ReferenceLine yAxisId="right" y={0} stroke="rgba(255,255,255,0.15)" /></ComposedChart></ResponsiveContainer></div></div>
+
+            <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83c\udfaf'} Market Segment Breakdown</h3><div style={{ height: 280, display: 'flex', gap: 16 }}><div style={{ flex: 1 }}><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={segmentData} dataKey="count" nameKey="name" cx="50%" cy="50%" outerRadius={90} innerRadius={50} paddingAngle={3}>{segmentData.map((e, i) => <Cell key={i} fill={SEGMENT_COLORS_MAP[e.name] || COLORS[i]} />)}</Pie><Tooltip content={<CustomTooltip prefix="" />} /><Legend wrapperStyle={{ fontSize: 11, color: '#94a3b8' }} /></PieChart></ResponsiveContainer></div><div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 12 }}>{segmentData.map((s, i) => <div key={s.name} style={{ display: 'flex', alignItems: 'center', gap: 10 }}><div style={{ width: 10, height: 10, borderRadius: 3, background: SEGMENT_COLORS_MAP[s.name] || COLORS[i] }} /><div><div style={{ color: '#e2e8f0', fontSize: 13, fontWeight: 600 }}>{s.name}</div><div style={{ color: '#64748b', fontSize: 11 }}>{formatCurrency(s.avgPsf)} psf {'\u2022'} {s.count} txns</div></div></div>)}</div></div></div>
+
+            <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udcca'} PSF Distribution</h3><div style={{ height: 280 }}><ResponsiveContainer width="100%" height="100%"><BarChart data={psfDistribution}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="range" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} angle={-30} textAnchor="end" height={60} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} /><Tooltip content={<CustomTooltip prefix="" />} /><Bar dataKey="count" name="Transactions" fill="#8b5cf6" radius={[4,4,0,0]} /></BarChart></ResponsiveContainer></div></div>
+
+            <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udcc9'} Cumulative Transaction Volume</h3><div style={{ height: 280 }}><ResponsiveContainer width="100%" height="100%"><AreaChart data={cumulativeData}><defs><linearGradient id="cumGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#0ea5e9" stopOpacity={0.3} /><stop offset="95%" stopColor="#0ea5e9" stopOpacity={0} /></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${(v/1e9).toFixed(1)}B`} /><Tooltip content={<CustomTooltip />} /><Area type="monotone" dataKey="cumulative" name="Cumulative" stroke="#0ea5e9" strokeWidth={2} fill="url(#cumGrad)" /></AreaChart></ResponsiveContainer></div></div>
+
+            <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83c\udfe2'} Property Type Analysis</h3><div style={{ height: 280 }}><ResponsiveContainer width="100%" height="100%"><BarChart data={typeAnalysis}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="name" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><Tooltip content={<CustomTooltip />} /><Bar dataKey="avgPsf" name="Avg PSF" fill="#14b8a6" radius={[6,6,0,0]} barSize={50} /></BarChart></ResponsiveContainer></div></div>
+
+            <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udccb'} Tenure Comparison</h3><div style={{ height: 280 }}><ResponsiveContainer width="100%" height="100%"><BarChart data={tenureAnalysis}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="name" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><Tooltip content={<CustomTooltip />} /><Bar dataKey="avgPsf" name="Avg PSF" radius={[6,6,0,0]} barSize={50}>{tenureAnalysis.map((e, i) => <Cell key={i} fill={i === 0 ? '#f59e0b' : '#6366f1'} />)}</Bar></BarChart></ResponsiveContainer></div></div>
+
+            <div style={{ gridColumn: '1 / -1', ...cardStyle }}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83c\udfc6'} Top 10 Projects by Volume</h3><div style={{ height: 320 }}><ResponsiveContainer width="100%" height="100%"><BarChart layout="vertical" data={topProjects}><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.06)" /><XAxis type="number" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} /><YAxis dataKey="name" type="category" width={180} tick={{ fill: '#94a3b8', fontSize: 10 }} axisLine={false} /><Tooltip content={<CustomTooltip prefix="" />} /><Bar dataKey="count" name="Transactions" fill="#6366f1" radius={[0,6,6,0]} barSize={18}>{topProjects.map((e, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}</Bar></BarChart></ResponsiveContainer></div></div>
+          </div>
+        )}
+
+        {activeTab === 'districts' && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16 }}>
+            <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udccd'} District Price Trend (All Districts)</h3><div style={{ height: 420 }}><ResponsiveContainer width="100%" height="100%"><LineChart data={districtTrendData}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><Tooltip content={<CustomTooltip />} /><Legend wrapperStyle={{ fontSize: 10, color: '#94a3b8' }} />{activeDistricts.map((d, i) => <Line key={d} type="monotone" dataKey={`D${d}`} name={`D${d}`} stroke={COLORS[i % COLORS.length]} strokeWidth={1.5} dot={false} connectNulls />)}</LineChart></ResponsiveContainer></div></div>
+            <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udcca'} District YoY Analysis</h3><div style={{ height: 380 }}><ResponsiveContainer width="100%" height="100%"><BarChart data={districtYoY}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="year" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><Tooltip content={<CustomTooltip />} /><Legend wrapperStyle={{ fontSize: 10, color: '#94a3b8' }} />{activeDistricts.map((d, i) => <Bar key={d} dataKey={`D${d}`} name={`D${d}`} fill={COLORS[i % COLORS.length]} radius={[2,2,0,0]} />)}</BarChart></ResponsiveContainer></div></div>
+          </div>
+        )}
+
+        {activeTab === 'advanced' && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 16 }}>
+            <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udd0d'} Price vs Area (by Segment)</h3><div style={{ height: 420 }}><ResponsiveContainer width="100%" height="100%"><ScatterChart><CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="area" name="Area (sqft)" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => v.toLocaleString()} /><YAxis dataKey="psf" name="PSF" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><ZAxis dataKey="price" range={[30, 200]} /><Tooltip cursor={{ strokeDasharray: '3 3' }} content={({ payload }) => { if (!payload?.length) return null; const d = payload[0]?.payload; return (<div style={{ background: 'rgba(15,23,42,0.95)', padding: '10px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', fontSize: 11, color: '#e2e8f0' }}><p style={{ fontWeight: 600, marginBottom: 4 }}>{d?.project}</p><p>Area: {d?.area?.toLocaleString()} sqft</p><p>PSF: ${d?.psf?.toLocaleString()}</p><p>Price: ${d?.price?.toLocaleString()}</p></div>); }} /><Legend wrapperStyle={{ fontSize: 11, color: '#94a3b8' }} />{scatterData.map(s => <Scatter key={s.segment} name={s.segment} data={s.data} fill={SEGMENT_COLORS_MAP[s.segment]} opacity={0.7} />)}</ScatterChart></ResponsiveContainer></div></div>
+
+            {/* Heatmap */}
+            <div style={{ ...cardStyle, padding: 0, overflow: 'hidden' }}>
+              <div style={{ padding: '20px 20px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                <div><div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}><span style={{ fontSize: 16 }}>{'\ud83d\udcc5\ufe0f'}</span><h3 style={{ color: '#e2e8f0', fontSize: 15, fontWeight: 600, margin: 0 }}>Historical Heatmap</h3></div><p style={{ color: '#64748b', fontSize: 12, margin: 0 }}>Floor Level {'\u00d7'} Year</p></div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <button onClick={() => setShowDiff(!showDiff)} style={{ background: showDiff ? 'rgba(56,189,248,0.2)' : 'rgba(255,255,255,0.06)', border: showDiff ? '1px solid rgba(56,189,248,0.4)' : '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '6px 14px', fontSize: 11, fontWeight: 500, cursor: cp, color: showDiff ? '#38bdf8' : '#94a3b8' }}>{'\u2194'} Changes</button>
+                  <div style={{ display: 'flex', background: 'rgba(255,255,255,0.06)', borderRadius: 8, padding: 2 }}>
+                    {[{ key: 'psf', label: '$ PSF' }, { key: 'price', label: '\ud83d\udcb5 Price' }, { key: 'volume', label: '\ud83d\udcca Vol' }].map(m => (
+                      <button key={m.key} onClick={() => setHeatmapMetric(m.key)} style={{ background: heatmapMetric === m.key ? 'rgba(255,255,255,0.12)' : 'transparent', border: 'none', borderRadius: 6, padding: '5px 12px', fontSize: 11, fontWeight: 500, color: heatmapMetric === m.key ? '#e2e8f0' : '#64748b', cursor: cp }}>{m.label}</button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div style={{ padding: 20, overflowX: 'auto' }}>
+                {matrixData.cols.length === 0 ? <div style={{ textAlign: 'center', padding: '40px 0', color: '#64748b' }}>No data available</div> : (
+                  <div style={{ minWidth: 800 }}>
+                    <div style={{ display: 'flex' }}>
+                      <div style={{ width: 80, flexShrink: 0 }} />
+                      {matrixData.cols.map(year => <div key={year} style={{ flex: 1, minWidth: 80, textAlign: 'center', fontSize: 12, fontWeight: 500, color: '#94a3b8', padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>{year}</div>)}
+                      {['Avg Incr.', '% Chg', 'Abs.', 'Total %'].map(h => <div key={h} style={{ width: 80, flexShrink: 0, textAlign: 'center', fontSize: 10, fontWeight: 600, color: '#cbd5e1', padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.03)', borderLeft: '1px solid rgba(255,255,255,0.06)' }}>{h}</div>)}
+                    </div>
+                    {matrixData.rows.map(floor => {
+                      const st = heatmapMetric === 'psf' ? matrixData.rowStatsPsf.get(floor) : heatmapMetric === 'price' ? matrixData.rowStatsPrice.get(floor) : matrixData.rowStatsVol.get(floor);
+                      return (
+                        <div key={floor} style={{ display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                          <div style={{ width: 80, flexShrink: 0, fontSize: 12, fontWeight: 600, color: '#cbd5e1', padding: '12px 8px', borderRight: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', fontFamily: fm }}>{floor}</div>
+                          {matrixData.cols.map(year => {
+                            const key = `${floor}-${year}`; const cell = matrixData.map.get(key); const dd = matrixData.diffMap.get(key);
+                            let dv = '-', bg = 'transparent', tc = '#475569';
+                            if (showDiff) { if (dd && !dd.isBase) { let diff = heatmapMetric === 'psf' ? dd.diffPsf : heatmapMetric === 'price' ? dd.diffPrice : dd.diffVol; if (diff != null) { dv = heatmapMetric === 'psf' ? (diff>0?'+':'')+Math.round(diff) : heatmapMetric === 'price' ? (diff>0?'+':'')+formatCompactNumber(diff) : (diff>0?'+':'')+diff; let mn=0,mx=0; if(heatmapMetric==='psf'){mn=matrixData.minDiffPsf;mx=matrixData.maxDiffPsf;}else if(heatmapMetric==='price'){mn=matrixData.minDiffPrice;mx=matrixData.maxDiffPrice;}else{mn=matrixData.minDiffVol;mx=matrixData.maxDiffVol;} bg=getDiffColor(diff,mn,mx); tc=getDiffTextColor(diff,mn,mx); } } } else if (cell) { let val=0,mn=0,mx=0; if(heatmapMetric==='psf'){val=Math.round(cell.totalPsf/cell.count);dv=`$${val.toLocaleString()}`;mn=matrixData.minPsf;mx=matrixData.maxPsf;}else if(heatmapMetric==='price'){val=cell.totalPrice/cell.count;dv=`$${formatCompactNumber(val)}`;mn=matrixData.minPrice;mx=matrixData.maxPrice;}else{val=cell.count;dv=val;mn=matrixData.minVol;mx=matrixData.maxVol;} bg=getHeatmapColor(val,mn,mx); tc=getHeatmapTextColor(val,mn,mx); }
+                            return <div key={key} style={{ flex: 1, minWidth: 80, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontFamily: fm, fontWeight: 500, backgroundColor: bg, color: tc }} title={cell ? `${floor} ${year}: $${Math.round(cell.totalPsf/cell.count).toLocaleString()} PSF (${cell.count} txns)` : 'No data'}>{dv}</div>;
+                          })}
+                          {[{ v: st?.avgIncrement, f: v => heatmapMetric==='psf'?Math.round(v):heatmapMetric==='price'?formatCompactNumber(v):v.toFixed(1), s: true },{ v: st?.avgPercChange, f: v => `${Math.abs(v).toFixed(1)}%`, a: true },{ v: st?.totalChangeVal, f: v => heatmapMetric==='psf'?Math.round(v):heatmapMetric==='price'?formatCompactNumber(v):v.toFixed(1), s: true },{ v: st?.totalChangePerc, f: v => `${Math.abs(v).toFixed(1)}%`, a: true }].map((s,si) => { const z = !s.v || s.v===0; const p = (s.v??0)>0; return <div key={si} style={{ width: 80, flexShrink: 0, height: 44, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontFamily: fm, borderLeft: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.02)', color: z ? '#475569' : p ? '#4ade80' : '#f87171' }}>{z ? '-' : <span>{s.a?(p?'\u2191 ':'\u2193 '):''}{s.s&&!s.a?(p?'+':''):''}{s.f(s.v)}</span>}</div>; })}
+                        </div>
+                      );
+                    })}
+                    <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8, fontSize: 11, color: '#64748b' }}><span>{showDiff ? 'Negative' : 'Low'}</span><div style={{ width: 100, height: 8, borderRadius: 4, background: showDiff ? 'linear-gradient(to right, rgba(239,68,68,0.7), rgba(241,245,249,0.3), rgba(34,197,94,0.7))' : 'linear-gradient(to right, rgba(14,165,233,0.1), rgba(14,165,233,1))' }} /><span>{showDiff ? 'Positive' : 'High'}</span></div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'floor' && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <div style={cardStyle}>
+              <h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 4 }}>{'\ud83c\udfe2'} Floor Premium Analysis</h3>
+              <p style={{ color: '#64748b', fontSize: 11, marginBottom: 12 }}>Based on {yearRangeLabel} transactions{selectedYears.length === 0 && latestFilteredYear ? ` \u00b7 Tip: filter by ${latestFilteredYear} for latest rates` : ''}</p>
+              <div style={{ height: 340 }}><ResponsiveContainer width="100%" height="100%"><BarChart data={floorPremium}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="floor" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><Tooltip content={<CustomTooltip />} /><Bar dataKey="avgPsf" name="Avg PSF" radius={[6,6,0,0]} barSize={28}>{floorPremium.map((e, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}</Bar></BarChart></ResponsiveContainer></div>
+            </div>
+            <div style={cardStyle}>
+              <h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 4 }}>{'\ud83d\udccb'} Floor Premium Table</h3>
+              <p style={{ color: '#64748b', fontSize: 11, marginBottom: 12 }}>Avg PSF per floor range {'\u00b7'} {yearRangeLabel}</p>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead><tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>{['Floor', 'Avg PSF', 'Count', 'Premium $', 'Premium %'].map(h => <th key={h} style={{ color: '#94a3b8', fontWeight: 500, padding: '10px 12px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                  <tbody>{floorPremium.map((f, i) => (
+                    <tr key={f.floor} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)' }}>
+                      <td style={{ color: '#e2e8f0', padding: '10px 12px', fontWeight: 600, fontFamily: fm }}>{f.floor}</td>
+                      <td style={{ color: '#38bdf8', padding: '10px 12px', fontFamily: fm }}>{formatCurrency(f.avgPsf)}</td>
+                      <td style={{ color: '#94a3b8', padding: '10px 12px' }}>{f.count}</td>
+                      <td style={{ color: f.premiumDollar > 0 ? '#34d399' : f.premiumDollar < 0 ? '#f87171' : '#94a3b8', padding: '10px 12px', fontFamily: fm }}>{f.premiumDollar > 0 ? '+' : ''}{formatCurrency(f.premiumDollar)}</td>
+                      <td style={{ color: f.premiumPct > 0 ? '#34d399' : f.premiumPct < 0 ? '#f87171' : '#94a3b8', padding: '10px 12px', fontFamily: fm }}>{f.premiumPct > 0 ? '+' : ''}{f.premiumPct}%</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'rental' && (
+          <div>
+            {rentalLoading ? (
+              <div style={{ textAlign: 'center', padding: '60px 0' }}>
+                <div style={{ width: 40, height: 40, border: '3px solid rgba(56,189,248,0.2)', borderTopColor: '#38bdf8', borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 16px' }} />
+                <p style={{ color: '#94a3b8', fontSize: 13 }}>Loading rental data...</p>
+                <p style={{ color: '#475569', fontSize: 11, marginTop: 4 }}>Fetching quarterly data (this may take a moment)</p>
+                <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+              </div>
+            ) : filteredRentals.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '60px 0', color: '#64748b' }}>
+                <div style={{ fontSize: 40, marginBottom: 12 }}>{'\ud83c\udfe0'}</div>
+                <p style={{ fontSize: 14 }}>No rental data available</p>
+                <p style={{ fontSize: 12, marginTop: 4 }}>Rental data may not be available for all periods</p>
+              </div>
+            ) : (
+              <div>
+                <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'center' }}>
+                  <select value={rentalBedroom} onChange={e => setRentalBedroom(e.target.value)} style={{ ...bs, minWidth: 120 }}>
+                    {rentalBedrooms.map(b => <option key={b} value={b}>Bedrooms: {b}</option>)}
+                  </select>
+                  <span style={{ color: '#475569', fontSize: 11 }}>{filteredRentals.length.toLocaleString()} rental contracts</span>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 12, marginBottom: 16 }}>
+                  {[
+                    { label: 'Rental Contracts', value: rentalStats.count.toLocaleString(), color: '#38bdf8', icon: '\ud83d\udccb' },
+                    { label: 'Avg Monthly Rent', value: `$${rentalStats.avgRent.toLocaleString()}`, color: '#34d399', icon: '\ud83d\udcb5' },
+                    { label: 'Median Rent', value: `$${rentalStats.medianRent.toLocaleString()}`, color: '#f472b6', icon: '\ud83d\udcca' },
+                    { label: 'Avg Rent PSF', value: `$${rentalStats.avgRentPsf}`, color: '#fb923c', icon: '\ud83d\udcd0' },
+                  ].map((s, i) => (
+                    <div key={i} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: 12, padding: '14px 16px', border: '1px solid rgba(255,255,255,0.06)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                        <span style={{ color: '#64748b', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.5px' }}>{s.label}</span>
+                        <span style={{ fontSize: 14 }}>{s.icon}</span>
+                      </div>
+                      <div style={{ color: s.color, fontSize: 18, fontWeight: 700, fontFamily: fm }}>{s.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                  <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udcc8'} Rental Trend (Quarterly)</h3><div style={{ height: 280 }}><ResponsiveContainer width="100%" height="100%"><ComposedChart data={rentalTrend}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="quarter" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} angle={-30} textAnchor="end" height={50} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><Tooltip content={<CustomTooltip />} /><Bar dataKey="avgRent" name="Avg Rent" fill="#6366f1" radius={[4,4,0,0]} barSize={16} /><Line dataKey="avgRent" name="Trend" stroke="#38bdf8" strokeWidth={2} dot={false} /></ComposedChart></ResponsiveContainer></div></div>
+
+                  <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udecf\ufe0f'} Rent by Bedroom Count</h3><div style={{ height: 280 }}><ResponsiveContainer width="100%" height="100%"><BarChart data={rentalByBedroom}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="bedroom" tick={{ fill: '#64748b', fontSize: 11 }} axisLine={false} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><Tooltip content={<CustomTooltip />} /><Bar dataKey="avgRent" name="Avg Rent" radius={[6,6,0,0]} barSize={40}>{rentalByBedroom.map((e, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}</Bar></BarChart></ResponsiveContainer></div></div>
+
+                  <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udccd'} Avg Rent by District</h3><div style={{ height: 280 }}><ResponsiveContainer width="100%" height="100%"><BarChart data={rentalByDistrict}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="district" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><Tooltip content={<CustomTooltip />} /><Bar dataKey="avgRent" name="Avg Rent" fill="#14b8a6" radius={[4,4,0,0]} barSize={16} /></BarChart></ResponsiveContainer></div></div>
+
+                  <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udcd0'} Rent PSF by District</h3><div style={{ height: 280 }}><ResponsiveContainer width="100%" height="100%"><BarChart data={rentalPsfByDistrict}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="district" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toFixed(1)}`} /><Tooltip content={<CustomTooltip />} /><Bar dataKey="rentPsf" name="Rent PSF" fill="#f59e0b" radius={[4,4,0,0]} barSize={16} /></BarChart></ResponsiveContainer></div></div>
+
+                  <div style={{ gridColumn: '1 / -1', ...cardStyle }}>
+                    <h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 4 }}>{'\ud83d\udcb0'} Estimated Gross Rental Yield by District</h3>
+                    <p style={{ color: '#64748b', fontSize: 11, marginBottom: 16 }}>Annual Rent {'\u00f7'} Purchase Price PSF {'\u2022'} based on {yearRangeLabel} data</p>
+                    {rentalYield.length === 0 ? (
+                      <p style={{ color: '#475569', fontSize: 12, textAlign: 'center', padding: 20 }}>Need both rental and transaction data to calculate yield</p>
+                    ) : (
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+                        <div style={{ height: 320 }}>
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={rentalYield} layout="vertical">
+                              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="rgba(255,255,255,0.06)" />
+                              <XAxis type="number" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `${v}%`} />
+                              <YAxis dataKey="district" type="category" width={50} tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} />
+                              <Tooltip content={({ payload }) => { if (!payload?.length) return null; const d = payload[0]?.payload; return (<div style={{ background: 'rgba(15,23,42,0.95)', padding: '10px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', fontSize: 11, color: '#e2e8f0' }}><p style={{ fontWeight: 600, marginBottom: 6 }}>{d?.district}</p><p>Yield: <span style={{ color: '#34d399' }}>{d?.yield}%</span></p><p>Rent PSF: ${d?.rentPsf}/mo</p><p>Buy PSF: ${d?.buyPsf?.toLocaleString()}</p></div>); }} />
+                              <Bar dataKey="yield" name="Yield %" radius={[0,6,6,0]} barSize={16}>
+                                {rentalYield.map((e, i) => <Cell key={i} fill={e.yield >= 3 ? '#22c55e' : e.yield >= 2.5 ? '#f59e0b' : '#ef4444'} />)}
+                              </Bar>
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                        <div style={{ overflowX: 'auto' }}>
+                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                            <thead><tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>{['District', 'Rent PSF/mo', 'Buy PSF', 'Gross Yield'].map(h => <th key={h} style={{ color: '#94a3b8', fontWeight: 500, padding: '10px 12px', textAlign: 'left' }}>{h}</th>)}</tr></thead>
+                            <tbody>{rentalYield.map((r, i) => (
+                              <tr key={r.district} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)', background: i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)' }}>
+                                <td style={{ color: '#e2e8f0', padding: '10px 12px', fontWeight: 600, fontFamily: fm }}>{r.district}</td>
+                                <td style={{ color: '#f59e0b', padding: '10px 12px', fontFamily: fm }}>${r.rentPsf}</td>
+                                <td style={{ color: '#38bdf8', padding: '10px 12px', fontFamily: fm }}>${r.buyPsf.toLocaleString()}</td>
+                                <td style={{ color: r.yield >= 3 ? '#22c55e' : r.yield >= 2.5 ? '#f59e0b' : '#ef4444', padding: '10px 12px', fontWeight: 700, fontFamily: fm }}>{r.yield}%</td>
+                              </tr>
+                            ))}</tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ gridColumn: '1 / -1', ...cardStyle }}>
+                    <h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>{'\ud83d\udccd'} Rental Trend by District (Quarterly)</h3>
+                    <div style={{ height: 380 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={rentalDistrictTrend}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" />
+                          <XAxis dataKey="quarter" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} />
+                          <YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} />
+                          <Tooltip content={<CustomTooltip />} />
+                          <Legend wrapperStyle={{ fontSize: 10, color: '#94a3b8' }} />
+                          {activeRentalDistricts.slice(0, 15).map((d, i) => <Line key={d} type="monotone" dataKey={`D${d}`} name={`D${d}`} stroke={COLORS[i % COLORS.length]} strokeWidth={1.5} dot={false} connectNulls />)}
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ===== ANALYSIS TAB ===== */}
+        {activeTab === 'analyze' && <div>
+          {/* Project search */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ position: 'relative', maxWidth: 400 }}>
+              <input type="text" placeholder="Search project name..." value={analyzeSearch} onChange={e => { setAnalyzeSearch(e.target.value); setShowAnalyzeDD(true); }} onFocus={() => setShowAnalyzeDD(true)} style={{ width: '100%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '12px 16px', color: '#e2e8f0', fontSize: 14, outline: 'none', fontFamily: fm }} />
+              {showAnalyzeDD && analyzeSearch.trim() && <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 4, background: '#1e293b', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, zIndex: 50, maxHeight: 320, overflowY: 'auto', boxShadow: '0 12px 40px rgba(0,0,0,0.5)' }}>
+                {analyzeFilteredProjects.length === 0 ? <div style={{ padding: 16, color: '#64748b', fontSize: 12, textAlign: 'center' }}>No projects found</div> : analyzeFilteredProjects.map(p => <div key={p} onClick={() => { setAnalyzeProject(p); setAnalyzeSearch(p); setShowAnalyzeDD(false); setAnalyzeTab('overview'); setPricingArea(''); setPricingFloor(''); }} style={{ padding: '10px 16px', fontSize: 13, cursor: cp, color: p === analyzeProject ? '#a78bfa' : '#cbd5e1', borderBottom: '1px solid rgba(255,255,255,0.04)' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.06)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>{p}</div>)}
+              </div>}
+            </div>
+          </div>
+
+          {analyzeProject && projSaleStats ? <div>
+            {/* Project info bar */}
+            <div style={{ ...cardStyle, marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+              <div>
+                <h2 style={{ color: '#e2e8f0', fontSize: 18, fontWeight: 700, margin: 0 }}>{analyzeProject}</h2>
+                <p style={{ color: '#64748b', fontSize: 12, marginTop: 4 }}>D{projInfo?.district} {'\u2022'} {projInfo?.segment} {'\u2022'} {projInfo?.tenure} {'\u2022'} {projSaleStats.count} transactions</p>
+              </div>
+              <div style={{ display: 'flex', gap: 16 }}>
+                {[{ label: 'Avg PSF', value: $f(projSaleStats.avgPsf), color: '#38bdf8' }, { label: 'Volume', value: `$${(projSaleStats.totalVol / 1e6).toFixed(1)}M`, color: '#a78bfa' }, { label: 'Range', value: `${$f(projSaleStats.minPsf)}\u2013${$f(projSaleStats.maxPsf)}`, color: '#94a3b8' }].map((s,i) => <div key={i} style={{ textAlign: 'right' }}><div style={{ color: '#64748b', fontSize: 10 }}>{s.label}</div><div style={{ color: s.color, fontSize: 16, fontWeight: 700, fontFamily: fm }}>{s.value}</div></div>)}
+              </div>
+            </div>
+
+            {/* Subtabs */}
+            <div style={{ display: 'flex', gap: 4, marginBottom: 16 }}>
+              {[{id:'overview',label:'Overview'},{id:'pricing',label:'Pricing'},{id:'floor',label:'Floor'},{id:'compare',label:'Compare'}].map(t => <button key={t.id} onClick={() => setAnalyzeTab(t.id)} style={{ background: analyzeTab === t.id ? 'rgba(167,139,250,0.15)' : 'transparent', border: analyzeTab === t.id ? '1px solid rgba(167,139,250,0.3)' : '1px solid transparent', borderRadius: 8, padding: '8px 16px', color: analyzeTab === t.id ? '#a78bfa' : '#64748b', fontSize: 12, fontWeight: 500, cursor: cp }}>{t.label}</button>)}
+            </div>
+
+            {/* Overview subtab */}
+            {analyzeTab === 'overview' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>Area vs PSF</h3><div style={{ height: 280 }}>{projScatter.length ? <ResponsiveContainer width="100%" height="100%"><ScatterChart><CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="area" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} /><YAxis dataKey="psf" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v}`} /><Tooltip cursor={{ strokeDasharray: '3 3' }} content={({ payload }) => { if (!payload?.length) return null; const d = payload[0]?.payload; return <div style={{ background: 'rgba(15,23,42,0.95)', padding: '10px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.1)', fontSize: 11, color: '#e2e8f0' }}><p>Fl {d?.floor} {'\u2022'} {d?.date}</p><p>{d?.area?.toLocaleString()} sqft {'\u2022'} ${d?.psf} PSF {'\u2022'} ${d?.price?.toLocaleString()}</p></div>; }} /><Scatter data={projScatter} fill="#a78bfa" opacity={0.8} /></ScatterChart></ResponsiveContainer> : <p style={{ color: '#64748b' }}>No data</p>}</div></div>
+              <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>Nearby Projects (D{projInfo?.district})</h3><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}><thead><tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>{['Project', 'Avg PSF', 'Txns'].map(h => <th key={h} style={thStyle}>{h}</th>)}</tr></thead><tbody>{nearbyProjects.map((p, i) => <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}><td style={{ ...tdStyle, color: '#e2e8f0', fontSize: 11 }}>{p.name.length > 30 ? p.name.substring(0,30)+'\u2026' : p.name}</td><td style={{ ...tdStyle, color: '#38bdf8', fontFamily: fm }}>{$f(p.avgPsf)}</td><td style={{ ...tdStyle, color: '#94a3b8' }}>{p.count}</td></tr>)}</tbody></table></div></div>
+            </div>}
+
+            {/* Pricing subtab */}
+            {analyzeTab === 'pricing' && (() => {
+              const defArea = projAreas.length ? projAreas[Math.floor(projAreas.length / 2)] : 0;
+              const rawArea = parseFloat(pricingArea) || defArea;
+              const area = projAreas.length ? projAreas.reduce((p,c) => Math.abs(c-rawArea) < Math.abs(p-rawArea) ? c : p) : rawArea;
+              const sf = pricingFloor; const yr = projLatestSaleYear;
+              const latAll = projTx.filter(t => t.year === yr);
+              const latPsf = latAll.length ? Math.round((latAll.reduce((s,t) => s+t.psf, 0) / latAll.length) * 100) / 100 : projSaleStats ? projSaleStats.avgPsf : 0;
+              const sizeTx = area > 0 ? latAll.filter(t => t.areaSqft === area) : [];
+              const sizePsf = sizeTx.length ? Math.round((sizeTx.reduce((s,t) => s+t.psf, 0) / sizeTx.length) * 100) / 100 : 0;
+              const matchTx = sf && area > 0 ? sizeTx.filter(t => t.floorRange === sf) : [];
+              const matchPsf = matchTx.length ? Math.round((matchTx.reduce((s,t) => s+t.psf, 0) / matchTx.length) * 100) / 100 : 0;
+              const bestPsf = matchPsf || sizePsf || latPsf;
+              const bestLabel = matchPsf ? 'Exact Match' : sizePsf ? 'Size Match' : 'Project Avg';
+              const bestTx = matchPsf ? matchTx : sizePsf ? sizeTx : latAll;
+              const iS = { background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, padding: '8px 12px', color: '#e2e8f0', fontSize: 13, fontFamily: fm, outline: 'none', width: '100%' };
+              const srt = a => [...a].sort((a,b) => b.contractDate.localeCompare(a.contractDate));
+
+              return <div style={{ display: 'grid', gap: 14 }}>
+                <div style={{ ...cardStyle, background: 'linear-gradient(135deg,#1e293b,#0f172a)', border: '1px solid rgba(167,139,250,0.2)', padding: 0, overflow: 'hidden' }}>
+                  <div style={{ padding: '24px 24px 20px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
+                      <div>
+                        <div style={{ color: '#94a3b8', fontSize: 11, fontWeight: 600, letterSpacing: 1, marginBottom: 8 }}>ESTIMATED PRICE{yr && <span style={{ background: 'rgba(34,197,94,0.15)', borderRadius: 4, padding: '2px 8px', fontSize: 9, fontWeight: 700, color: '#4ade80', marginLeft: 8 }}>{yr}</span>}</div>
+                        <div style={{ color: '#e2e8f0', fontSize: 36, fontWeight: 800, fontFamily: fm, lineHeight: 1 }}>{$c(bestPsf * area)}</div>
+                        <div style={{ color: '#64748b', fontSize: 12, marginTop: 8 }}>{$f(bestPsf)} PSF {'\u00d7'} {area.toLocaleString()} sqft</div>
+                      </div>
+                      <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 10, padding: '10px 14px', textAlign: 'right' }}>
+                        <div style={{ color: '#64748b', fontSize: 9, marginBottom: 2 }}>BASED ON</div>
+                        <div style={{ color: '#a78bfa', fontSize: 13, fontWeight: 700 }}>{bestLabel}</div>
+                        <div style={{ color: '#475569', fontSize: 10 }}>{bestTx.length} transaction{bestTx.length !== 1 ? 's' : ''}</div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                      <div><label style={{ color: '#94a3b8', fontSize: 10, fontWeight: 600, marginBottom: 6, display: 'block' }}>UNIT TYPE</label>
+                        {projAreas.length > 0 ? <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>{projAreas.map(a => <button key={a} onClick={() => setPricingArea(String(a))} style={{ background: area === a ? '#a78bfa' : 'rgba(255,255,255,0.06)', border: area === a ? '1px solid #a78bfa' : '1px solid rgba(255,255,255,0.12)', borderRadius: 6, padding: '6px 12px', fontSize: 12, color: area === a ? '#fff' : '#94a3b8', cursor: cp, fontFamily: fm, fontWeight: area === a ? 700 : 400 }}>{a.toLocaleString()}</button>)}</div> : <input type="number" value={pricingArea} onChange={e => setPricingArea(e.target.value)} placeholder="sqft" style={iS} />}
+                      </div>
+                      <div><label style={{ color: '#94a3b8', fontSize: 10, fontWeight: 600, marginBottom: 6, display: 'block' }}>FLOOR LEVEL</label>
+                        <select value={pricingFloor} onChange={e => setPricingFloor(e.target.value)} style={{ ...iS, cursor: cp }}><option value="">All floors</option>{projFloorDetail.map(f => <option key={f.floor} value={f.floor}>{f.floor} ({f.allCount} tx)</option>)}</select>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', display: 'grid', background: 'rgba(255,255,255,0.02)' }}>
+                    {(() => { const cols = [{ psf: latPsf, label: 'Project Avg', sub: `All sizes \u2022 All floors \u2022 ${latAll.length}tx`, c: '#94a3b8', active: !sizePsf && !matchPsf }]; if (sizePsf) cols.push({ psf: sizePsf, label: `${area.toLocaleString()} sqft`, sub: `Exact size \u2022 All floors \u2022 ${sizeTx.length}tx`, c: '#38bdf8', active: !matchPsf }); if (sf) cols.push(matchPsf ? { psf: matchPsf, label: `${area.toLocaleString()} \u2022 Fl ${sf}`, sub: `Exact size & floor \u2022 ${matchTx.length}tx`, c: '#22c55e', active: true } : { psf: 0, label: `Fl ${sf}`, sub: 'No matching tx', c: '#475569', active: false }); return <div style={{ display: 'grid', gridTemplateColumns: cols.map(() => '1fr').join(' ') }}>{cols.map((t,i) => <div key={i} style={{ padding: '14px 16px', borderRight: i < cols.length-1 ? '1px solid rgba(255,255,255,0.06)' : 'none', background: t.active ? 'rgba(167,139,250,0.04)' : 'transparent' }}><div style={{ color: t.c, fontSize: 18, fontWeight: 800, fontFamily: fm }}>{t.psf ? $c(t.psf * area) : '\u2014'}</div><div style={{ color: '#94a3b8', fontSize: 10, fontWeight: 600, marginTop: 2 }}>{t.label}</div><div style={{ color: '#475569', fontSize: 9, marginTop: 2 }}>{t.sub}</div>{t.psf > 0 && latPsf > 0 && t.psf !== latPsf && <div style={{ color: t.psf < latPsf ? '#4ade80' : '#f87171', fontSize: 10, fontWeight: 600, fontFamily: fm, marginTop: 4 }}>{t.psf < latPsf ? '' : '+'}{Math.round((t.psf - latPsf) / latPsf * 1000) / 10}% vs avg</div>}</div>)}</div>; })()}
+                  </div>
+                </div>
+                {bestTx.length > 0 && <div style={{ ...cardStyle, padding: 0, overflow: 'hidden' }}>
+                  <div style={{ padding: '14px 20px', borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><span style={{ color: '#e2e8f0', fontSize: 13, fontWeight: 600 }}>Transactions Used</span><span style={{ color: '#64748b', fontSize: 11 }}>{bestLabel} {'\u2022'} {bestTx.length} records</span></div>
+                  <div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse' }}><thead><tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>{['Date','Size','Floor','PSF','Price'].map(h => <th key={h} style={{ ...thStyle, fontSize: 10, padding: '8px 10px' }}>{h}</th>)}</tr></thead><tbody>{srt(bestTx).slice(0,8).map((t,i) => <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}><td style={{ ...tdStyle, color: '#94a3b8', fontSize: 11, padding: '8px 10px' }}>{t.contractDate}</td><td style={{ ...tdStyle, color: '#e2e8f0', fontFamily: fm, fontSize: 11, padding: '8px 10px' }}>{t.areaSqft.toLocaleString()}</td><td style={{ ...tdStyle, color: '#e2e8f0', fontFamily: fm, fontSize: 11, padding: '8px 10px' }}>{t.floorRange}</td><td style={{ ...tdStyle, color: '#38bdf8', fontFamily: fm, fontWeight: 600, fontSize: 11, padding: '8px 10px' }}>{$f(t.psf)}</td><td style={{ ...tdStyle, color: '#e2e8f0', fontFamily: fm, fontWeight: 600, fontSize: 11, padding: '8px 10px' }}>{$c(t.priceNum)}</td></tr>)}</tbody></table>
+                  {bestTx.length > 8 && <div style={{ color: '#475569', fontSize: 10, textAlign: 'center', padding: 8 }}>+{bestTx.length - 8} more</div>}
+                  </div>
+                </div>}
+              </div>;
+            })()}
+
+            {/* Floor subtab */}
+            {analyzeTab === 'floor' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>Floor Premium</h3><div style={{ height: 340 }}>{projFloor.length ? <ResponsiveContainer width="100%" height="100%"><BarChart data={projFloor}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="floor" tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><Tooltip content={<CustomTooltip />} /><Bar dataKey="avgPsf" name="Avg PSF" radius={[6,6,0,0]} barSize={28}>{projFloor.map((e, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}</Bar></BarChart></ResponsiveContainer> : <p style={{ color: '#64748b' }}>No data</p>}</div></div>
+              <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 16 }}>Floor Table</h3><div style={{ overflowX: 'auto' }}><table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}><thead><tr style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}>{['Floor','Avg PSF','Count','vs Avg $','vs Avg %'].map(h => <th key={h} style={thStyle}>{h}</th>)}</tr></thead><tbody>{projFloor.map((f,i) => <tr key={f.floor} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}><td style={{ ...tdStyle, color: '#e2e8f0', fontWeight: 600, fontFamily: fm }}>{f.floor}</td><td style={{ ...tdStyle, color: '#38bdf8', fontFamily: fm }}>{$f(f.avgPsf)}</td><td style={{ ...tdStyle, color: '#94a3b8' }}>{f.count}</td><td style={{ ...tdStyle, color: f.premDollar > 0 ? '#34d399' : f.premDollar < 0 ? '#f87171' : '#94a3b8', fontFamily: fm }}>{f.premDollar > 0 ? '+' : ''}{$f(f.premDollar)}</td><td style={{ ...tdStyle, color: f.premPct > 0 ? '#34d399' : f.premPct < 0 ? '#f87171' : '#94a3b8', fontFamily: fm }}>{f.premPct > 0 ? '+' : ''}{f.premPct}%</td></tr>)}</tbody></table></div></div>
+            </div>}
+
+            {/* Compare subtab */}
+            {analyzeTab === 'compare' && <div style={{ display: 'grid', gap: 16 }}>
+              <div style={cardStyle}><h3 style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Project vs District vs Segment</h3><p style={{ color: '#64748b', fontSize: 11, marginBottom: 16 }}>{analyzeProject} vs D{projInfo?.district} vs {projInfo?.segment}</p><div style={{ height: 380 }}><ResponsiveContainer width="100%" height="100%"><LineChart data={projComparison}><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.06)" /><XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 9 }} axisLine={false} /><YAxis tick={{ fill: '#64748b', fontSize: 10 }} axisLine={false} tickFormatter={v => `$${v.toLocaleString()}`} /><Tooltip content={<CustomTooltip />} /><Legend wrapperStyle={{ fontSize: 11 }} /><Line type="monotone" dataKey="project" name={analyzeProject.length > 20 ? analyzeProject.substring(0,20)+'\u2026' : analyzeProject} stroke="#a78bfa" strokeWidth={2.5} dot={{ r: 3, fill: '#a78bfa' }} connectNulls /><Line type="monotone" dataKey="district" name={`D${projInfo?.district} Avg`} stroke="#38bdf8" strokeWidth={1.5} strokeDasharray="5 5" dot={false} connectNulls /><Line type="monotone" dataKey="segment" name={`${projInfo?.segment} Avg`} stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="3 3" dot={false} connectNulls /></LineChart></ResponsiveContainer></div></div>
+            </div>}
+          </div> : <div style={{ textAlign: 'center', padding: '60px 0', color: '#64748b' }}><div style={{ fontSize: 40, marginBottom: 12 }}>{'\ud83d\udd0d'}</div><p style={{ fontSize: 14 }}>Search for a project above to analyze</p><p style={{ fontSize: 12, marginTop: 4 }}>Get pricing estimates, floor premium analysis, and market comparison</p></div>}
+        </div>}
+      </div>
+
+      <div style={{ textAlign: 'center', padding: '20px 28px', borderTop: '1px solid rgba(255,255,255,0.06)', color: '#475569', fontSize: 11 }}>
+        URA Property Analytics Dashboard {'\u2022'} {filtered.length.toLocaleString()} transactions{allRentals.length > 0 ? ` \u2022 ${allRentals.length.toLocaleString()} rental contracts` : ''} {'\u2022'} All values shown without rounding
+      </div>
+    </div>
+  );
 }
