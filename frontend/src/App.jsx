@@ -137,7 +137,7 @@ export default function App() {
 
   const latestFilteredYear = useMemo(() => {
     if (!filtered.length) return null;
-    return Math.max(...filtered.map(t => t.year));
+    return filtered.reduce((m, t) => t.year > m ? t.year : m, filtered[0].year);
   }, [filtered]);
 
   // ===== COMPUTED DATA =====
@@ -403,7 +403,7 @@ export default function App() {
 
   const projTx = useMemo(() => allTransactions.filter(t => t.project === analyzeProject), [allTransactions, analyzeProject]);
   const projAreas = useMemo(() => [...new Set(projTx.map(t => t.areaSqft))].sort((a,b) => a - b), [projTx]);
-  const projLatestSaleYear = useMemo(() => projTx.length ? Math.max(...projTx.map(t => t.year)) : null, [projTx]);
+  const projLatestSaleYear = useMemo(() => projTx.length ? projTx.reduce((m, t) => t.year > m ? t.year : m, projTx[0].year) : null, [projTx]);
 
   const projInfo = useMemo(() => {
     if (!projTx.length) return null;
