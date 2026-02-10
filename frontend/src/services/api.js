@@ -1,17 +1,17 @@
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 const SQM_TO_SQFT = 10.764;
 
-// Normalize a transaction from the backend's flattened format
+// ============================================================
+// DATA NORMALIZATION
+// ============================================================
 function normalizeTransaction(tx) {
   const areaSqm = parseFloat(tx.area || tx.areaNum) || 0;
   const price = parseFloat(tx.price || tx.priceNum) || 0;
   const psm = areaSqm > 0 ? price / areaSqm : 0;
   const psf = psm / SQM_TO_SQFT;
 
-  // Parse contractDate - handle both "MMYY" and "YYYY-MM" formats
   let contractDate = tx.contractDate || '';
   let year = 0;
-  
   if (contractDate.match(/^\d{4}-\d{2}$/)) {
     year = parseInt(contractDate.split('-')[0]);
   } else if (contractDate.length === 4) {
@@ -55,26 +55,82 @@ function normalizeTransaction(tx) {
 function processProjectResults(results) {
   const txns = [];
   if (!Array.isArray(results)) return txns;
-  results.forEach(project => {
+  for (let i = 0; i < results.length; i++) {
+    const project = results[i];
     if (project.transaction && Array.isArray(project.transaction)) {
-      project.transaction.forEach(tx => {
+      for (let j = 0; j < project.transaction.length; j++) {
+        const tx = project.transaction[j];
         const merged = { ...tx, project: project.project, street: project.street, marketSegment: project.marketSegment };
         const norm = normalizeTransaction(merged);
         if (norm.year > 0 && norm.psf > 0) txns.push(norm);
-      });
+      }
     }
-  });
+  }
   return txns;
 }
 
-// Fetch a single batch
+function processRentalResults(results) {
+  const rentals = [];
+  if (!Array.isArray(results)) return rentals;
+  for (let i = 0; i < results.length; i++) {
+    const project = results[i];
+    if (project.rental && Array.isArray(project.rental)) {
+      for (let j = 0; j < project.rental.length; j++) {
+        const r = project.rental[j];
+        rentals.push({
+          project: project.project || '',
+          street: project.street || '',
+          district: r.district || '',
+          propertyType: r.propertyType || '',
+          areaSqm: r.areaSqm || '',
+          areaSqft: r.areaSqft || '',
+          rent: parseFloat(r.rent) || 0,
+          leaseDate: r.leaseDate || '',
+          noOfBedRoom: r.noOfBedRoom || '',
+          refPeriod: r.refPeriod || '',
+        });
+      }
+    }
+  }
+  return rentals;
+}
+
+// ============================================================
+// SINGLE FETCH - 1 request gets everything
+// ============================================================
+let cachedData = null;
+
+async function fetchAllData() {
+  // Return cached if available (same session)
+  if (cachedData) return cachedData;
+
+  try {
+    console.log('Fetching all data in single request...');
+    const res = await fetch(`${API_URL}/api/all-data`);
+    if (!res.ok) throw new Error(`all-data returned ${res.status}`);
+    const data = await res.json();
+
+    const transactions = processProjectResults(data.transactions?.Result || []);
+    const rentals = processRentalResults(data.rentals?.Result || []);
+
+    console.log(`Loaded: ${transactions.length} transactions, ${rentals.length} rentals (single request)`);
+    cachedData = { transactions, rentals };
+    return cachedData;
+  } catch (err) {
+    console.warn('all-data endpoint failed, falling back to individual requests:', err.message);
+    return null;
+  }
+}
+
+// ============================================================
+// FALLBACK - individual requests if all-data fails
+// ============================================================
 async function fetchBatch(batch) {
   try {
     const res = await fetch(`${API_URL}/api/transactions?batch=${batch}`);
     if (!res.ok) return [];
     const data = await res.json();
     if (data.Result && Array.isArray(data.Result)) {
-      console.log(`Batch ${batch}: ${data.Result.length} projects`);
       return processProjectResults(data.Result);
     }
     if (data.success && Array.isArray(data.data)) {
@@ -87,55 +143,34 @@ async function fetchBatch(batch) {
   }
 }
 
-// Fetch all transactions - ALL 4 BATCHES IN PARALLEL
-export async function getTransactions() {
-  const results = await Promise.all([
-    fetchBatch(1),
-    fetchBatch(2),
-    fetchBatch(3),
-    fetchBatch(4),
-  ]);
-  let all = [];
-  for (const arr of results) {
-    all = all.concat(arr);
-  }
-  console.log(`Total transactions loaded: ${all.length}`);
-  return all;
-}
-
-// Fetch a single rental period
 async function fetchRentalPeriod(refPeriod) {
   try {
     const res = await fetch(`${API_URL}/api/rentals?refPeriod=${refPeriod}`);
     if (!res.ok) return [];
     const data = await res.json();
-
     const results = data.Result || (data.success ? data.data : null);
     if (!results || !Array.isArray(results)) return [];
-
     const rentals = [];
-    if (results.length > 0 && results[0].rental) {
-      results.forEach(project => {
-        if (project.rental) {
-          project.rental.forEach(r => {
-            rentals.push({
-              project: project.project || '',
-              street: project.street || '',
-              district: r.district || '',
-              propertyType: r.propertyType || '',
-              areaSqm: r.areaSqm || '',
-              areaSqft: r.areaSqft || '',
-              rent: parseFloat(r.rent) || 0,
-              leaseDate: r.leaseDate || '',
-              noOfBedRoom: r.noOfBedRoom || '',
-              refPeriod,
-            });
+    for (let i = 0; i < results.length; i++) {
+      const project = results[i];
+      if (project.rental) {
+        for (let j = 0; j < project.rental.length; j++) {
+          const r = project.rental[j];
+          rentals.push({
+            project: project.project || '',
+            street: project.street || '',
+            district: r.district || '',
+            propertyType: r.propertyType || '',
+            areaSqm: r.areaSqm || '',
+            areaSqft: r.areaSqft || '',
+            rent: parseFloat(r.rent) || 0,
+            leaseDate: r.leaseDate || '',
+            noOfBedRoom: r.noOfBedRoom || '',
+            refPeriod,
           });
         }
-      });
+      }
     }
-
-    console.log(`Rentals ${refPeriod}: ${rentals.length} records`);
     return rentals;
   } catch (err) {
     console.warn(`Rentals ${refPeriod} error:`, err.message);
@@ -143,28 +178,42 @@ async function fetchRentalPeriod(refPeriod) {
   }
 }
 
-// Fetch rental data - ALL QUARTERS IN PARALLEL (batches of 6)
+// ============================================================
+// EXPORTS
+// ============================================================
+export async function getTransactions() {
+  // Try single endpoint first
+  const all = await fetchAllData();
+  if (all) return all.transactions;
+
+  // Fallback: parallel batch fetch
+  const results = await Promise.all([fetchBatch(1), fetchBatch(2), fetchBatch(3), fetchBatch(4)]);
+  let txns = [];
+  for (const arr of results) txns = txns.concat(arr);
+  console.log(`Total transactions (fallback): ${txns.length}`);
+  return txns;
+}
+
 export async function getRentals() {
+  // Try single endpoint first
+  const all = await fetchAllData();
+  if (all) return all.rentals;
+
+  // Fallback: parallel rental fetch
   const now = new Date();
   const refPeriods = [];
   for (let y = now.getFullYear() - 5; y <= now.getFullYear(); y++) {
     for (let q = 1; q <= 4; q++) {
-      const yy = String(y).slice(2);
-      refPeriods.push(`${yy}q${q}`);
+      refPeriods.push(`${String(y).slice(2)}q${q}`);
     }
   }
-
-  // Fetch in batches of 6 to avoid overwhelming the server
   const BATCH_SIZE = 6;
   let allRentals = [];
   for (let i = 0; i < refPeriods.length; i += BATCH_SIZE) {
     const chunk = refPeriods.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(chunk.map(fetchRentalPeriod));
-    for (const arr of results) {
-      allRentals = allRentals.concat(arr);
-    }
+    for (const arr of results) allRentals = allRentals.concat(arr);
   }
-
-  console.log(`Total rentals loaded: ${allRentals.length}`);
+  console.log(`Total rentals (fallback): ${allRentals.length}`);
   return allRentals;
 }
