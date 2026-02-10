@@ -237,6 +237,11 @@ async function fetchURAData(url, cacheKey) {
 // ROUTES
 // ============================================================
 
+// Cache headers middleware - browser caches for 5 min, CDN for 30 min
+function setCacheHeaders(res, seconds = 300) {
+  res.set('Cache-Control', `public, max-age=${seconds}, s-maxage=${seconds * 6}`);
+}
+
 // Health check
 app.get('/', (req, res) => {
   res.json({
@@ -255,6 +260,7 @@ app.get('/', (req, res) => {
 // Get transactions by batch (1-4)
 app.get('/api/transactions', async (req, res) => {
   try {
+    setCacheHeaders(res);
     const batch = parseInt(req.query.batch) || 1;
     if (batch < 1 || batch > 4) {
       return res.status(400).json({ error: 'Batch must be 1-4' });
@@ -311,6 +317,70 @@ app.get('/api/transactions/all', async (req, res) => {
   }
 });
 
+// ============================================================
+// SINGLE ENDPOINT - returns ALL data in one response
+// ============================================================
+app.get('/api/all-data', async (req, res) => {
+  try {
+    setCacheHeaders(res, 600); // 10 min browser, 1hr CDN
+
+    // Fetch all transactions in parallel
+    const txBatches = await Promise.all([1, 2, 3, 4].map(async (batch) => {
+      try {
+        const url = `${URA_DATA_URL}?service=PMI_Resi_Transaction&batch=${batch}`;
+        const data = await fetchURAData(url, `batch-${batch}`);
+        let result = data?.Result;
+        if (!Array.isArray(result)) {
+          if (result && typeof result === 'object') result = Object.values(result);
+          else return [];
+        }
+        return result;
+      } catch { return []; }
+    }));
+
+    // Fetch all rental quarters in parallel (batches of 6)
+    const now = new Date();
+    const refPeriods = [];
+    for (let y = now.getFullYear() - 5; y <= now.getFullYear(); y++) {
+      for (let q = 1; q <= 4; q++) {
+        refPeriods.push(`${String(y).slice(2)}q${q}`);
+      }
+    }
+
+    let allRentals = [];
+    for (let i = 0; i < refPeriods.length; i += 6) {
+      const chunk = refPeriods.slice(i, i + 6);
+      const rentalBatch = await Promise.all(chunk.map(async (rp) => {
+        try {
+          const url = `${URA_DATA_URL}?service=PMI_Resi_Rental&refPeriod=${rp}`;
+          const data = await fetchURAData(url, `rental-${rp}`);
+          let result = data?.Result;
+          if (!Array.isArray(result)) return [];
+          return result;
+        } catch { return []; }
+      }));
+      for (const arr of rentalBatch) {
+        allRentals = allRentals.concat(arr);
+      }
+    }
+
+    let allTransactions = [];
+    for (const batch of txBatches) {
+      allTransactions = allTransactions.concat(batch);
+    }
+
+    console.log(`✅ /api/all-data: ${allTransactions.length} projects, ${allRentals.length} rental projects`);
+
+    res.json({
+      transactions: { Result: allTransactions, Status: 'Success' },
+      rentals: { Result: allRentals, Status: 'Success' },
+    });
+  } catch (err) {
+    console.error('❌ /api/all-data error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Raw test endpoint - see exactly what URA returns
 app.get('/api/raw-test', async (req, res) => {
   try {
@@ -345,6 +415,7 @@ app.get('/api/raw-test', async (req, res) => {
 // Get rental data by refPeriod
 app.get('/api/rentals', async (req, res) => {
   try {
+    setCacheHeaders(res);
     const refPeriod = req.query.refPeriod;
     if (!refPeriod) {
       return res.status(400).json({ error: 'refPeriod is required (e.g. 24q1)' });
