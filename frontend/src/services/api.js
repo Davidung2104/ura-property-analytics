@@ -95,7 +95,10 @@ export async function getTransactions() {
     fetchBatch(3),
     fetchBatch(4),
   ]);
-  const all = results.flat();
+  let all = [];
+  for (const arr of results) {
+    all = all.concat(arr);
+  }
   console.log(`Total transactions loaded: ${all.length}`);
   return all;
 }
@@ -153,11 +156,13 @@ export async function getRentals() {
 
   // Fetch in batches of 6 to avoid overwhelming the server
   const BATCH_SIZE = 6;
-  const allRentals = [];
+  let allRentals = [];
   for (let i = 0; i < refPeriods.length; i += BATCH_SIZE) {
     const chunk = refPeriods.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(chunk.map(fetchRentalPeriod));
-    allRentals.push(...results.flat());
+    for (const arr of results) {
+      allRentals = allRentals.concat(arr);
+    }
   }
 
   console.log(`Total rentals loaded: ${allRentals.length}`);
