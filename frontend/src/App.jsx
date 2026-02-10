@@ -315,6 +315,19 @@ const EstCard=({tier,label,desc,psf,count,latest,color,icon,active})=>(<div styl
 {t1.psf>0&&psf!==t1.psf&&<div style={{color:psf>t1.psf?'#f87171':'#4ade80',fontSize:10,fontWeight:600,fontFamily:fm,marginTop:4}}>{psf>t1.psf?'+':''}{Math.round((psf-t1.psf)/t1.psf*1000)/10}% vs project avg</div>}
 </>:<div style={{color:'#475569',fontSize:13,marginTop:4}}>No matching transactions</div>}
 </div>);
+const hE=heatSelEstimates;const hArea=parseFloat(heatSelArea)||0;
+const srtH=a=>[...a].sort((x,y)=>y.contractDate.localeCompare(x.contractDate));
+const MiniEst=({label,icon,color,data,area})=>{if(!data)return <div style={{background:'#ffffff06',border:'1px solid #ffffff10',borderRadius:10,padding:'12px 14px',opacity:0.4}}><div style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}><span style={{fontSize:13}}>{icon}</span><span style={{color:'#64748b',fontSize:10,fontWeight:600}}>{label}</span></div><div style={{color:'#475569',fontSize:11}}>No data</div></div>;
+return <div style={{background:`${color}08`,border:`1px solid ${color}33`,borderRadius:10,padding:'12px 14px'}}>
+<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+<div style={{display:'flex',alignItems:'center',gap:6}}><span style={{fontSize:13}}>{icon}</span><span style={{color,fontSize:10,fontWeight:700}}>{label}</span></div>
+<span style={{color:'#475569',fontSize:9,background:'#ffffff0a',borderRadius:4,padding:'2px 6px'}}>{data.count} tx</span></div>
+{area>0?<><div style={{color:'#e2e8f0',fontSize:20,fontWeight:800,fontFamily:fm}}>{$c(data.avgPsf*area)}</div>
+<div style={{color:'#64748b',fontSize:10,marginTop:2,fontFamily:fm}}>{$(data.avgPsf)} avg · {$(data.latestPsf)} latest</div>
+<div style={{color:'#475569',fontSize:9,marginTop:2}}>Latest: {data.latest.contractDate}</div></>
+:<><div style={{color,fontSize:18,fontWeight:800,fontFamily:fm}}>{$(data.avgPsf)}</div>
+<div style={{color:'#64748b',fontSize:10,marginTop:2}}>avg PSF · latest {$(data.latestPsf)}</div></>}
+</div>;};
 return (<div style={{display:'grid',gap:14}}>
 <Card style={{padding:'20px 24px'}}>
 <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
@@ -372,19 +385,6 @@ return (<div style={{display:'grid',gap:14}}>
 </div>
 <div style={{overflowX:'auto',maxHeight:400,overflowY:'auto'}}><table style={{width:'100%',borderCollapse:'collapse'}}><thead style={{position:'sticky',top:0,background:'#1e293b',zIndex:1}}>{tH}</thead><tbody>{tR(projTxAll,projTxAll.length)}</tbody></table>
 </div></Card>}
-const hE=heatSelEstimates;const hArea=parseFloat(heatSelArea)||0;
-const srtH=a=>[...a].sort((x,y)=>y.contractDate.localeCompare(x.contractDate));
-const MiniEst=({label,icon,color,data,area})=>{if(!data)return <div style={{background:'#ffffff06',border:'1px solid #ffffff10',borderRadius:10,padding:'12px 14px',opacity:0.4}}><div style={{display:'flex',alignItems:'center',gap:6,marginBottom:4}}><span style={{fontSize:13}}>{icon}</span><span style={{color:'#64748b',fontSize:10,fontWeight:600}}>{label}</span></div><div style={{color:'#475569',fontSize:11}}>No data</div></div>;
-return <div style={{background:`${color}08`,border:`1px solid ${color}33`,borderRadius:10,padding:'12px 14px'}}>
-<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
-<div style={{display:'flex',alignItems:'center',gap:6}}><span style={{fontSize:13}}>{icon}</span><span style={{color,fontSize:10,fontWeight:700}}>{label}</span></div>
-<span style={{color:'#475569',fontSize:9,background:'#ffffff0a',borderRadius:4,padding:'2px 6px'}}>{data.count} tx</span></div>
-{area>0?<><div style={{color:'#e2e8f0',fontSize:20,fontWeight:800,fontFamily:fm}}>{$c(data.avgPsf*area)}</div>
-<div style={{color:'#64748b',fontSize:10,marginTop:2,fontFamily:fm}}>{$(data.avgPsf)} avg · {$(data.latestPsf)} latest</div>
-<div style={{color:'#475569',fontSize:9,marginTop:2}}>Latest: {data.latest.contractDate}</div></>
-:<><div style={{color,fontSize:18,fontWeight:800,fontFamily:fm}}>{$(data.avgPsf)}</div>
-<div style={{color:'#64748b',fontSize:10,marginTop:2}}>avg PSF · latest {$(data.latestPsf)}</div></>}
-</div>;};
 
 <Card style={{padding:0,overflow:'hidden'}}><div style={{padding:'20px 20px 16px',borderBottom:'1px solid #ffffff10',display:'flex',flexWrap:'wrap',justifyContent:'space-between',alignItems:'center',gap:12}}>
 <h3 style={{color:'#e2e8f0',fontSize:15,fontWeight:600,margin:0}}>Heatmap · Floor × Year{hArea>0?` · ${Math.round(hArea).toLocaleString()} sqft`:''}</h3>
