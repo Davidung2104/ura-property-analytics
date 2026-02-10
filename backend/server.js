@@ -8,8 +8,12 @@ const PORT = process.env.PORT || 3001;
 // CONFIG
 // ============================================================
 const URA_ACCESS_KEY = process.env.URA_ACCESS_KEY;
-const URA_TOKEN_URL = 'https://eservice.ura.gov.sg/uraDataService/insertNewToken/v1';
+const URA_TOKEN_URLS = [
+  'https://eservice.ura.gov.sg/uraDataService/insertNewToken/v1',
+  'https://www.ura.gov.sg/uraDataService/insertNewToken.action',
+];
 const URA_DATA_URL = 'https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1';
+const FETCH_TIMEOUT_MS = 15000; // 15 second timeout for all fetches
 
 // ============================================================
 // CORS - allow your Vercel frontend
@@ -19,26 +23,44 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173')
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, etc)
     if (!origin) return callback(null, true);
     if (allowedOrigins.some(allowed => origin.startsWith(allowed))) {
       return callback(null, true);
     }
-    callback(null, true); // Be permissive for now
+    callback(null, true);
   }
 }));
 
 app.use(express.json());
 
 // ============================================================
+// TIMEOUT FETCH - prevents hanging requests
+// ============================================================
+async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    return response;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(`Request to ${url} timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ============================================================
 // TOKEN MANAGEMENT - Auto refresh every 23 hours
 // ============================================================
 let tokenCache = {
-  token: null,
-  fetchedAt: null,
+  token: process.env.URA_TOKEN || null,
+  fetchedAt: process.env.URA_TOKEN ? Date.now() : null,
 };
 
-const TOKEN_LIFETIME_MS = 23 * 60 * 60 * 1000; // 23 hours (URA tokens last 24h)
+const TOKEN_LIFETIME_MS = 23 * 60 * 60 * 1000;
 
 function isTokenValid() {
   if (!tokenCache.token || !tokenCache.fetchedAt) return false;
@@ -46,69 +68,72 @@ function isTokenValid() {
 }
 
 async function getToken() {
-  // Return cached token if still valid
   if (isTokenValid()) {
     return tokenCache.token;
   }
 
-  // Fetch new token
-  console.log('🔑 Fetching new URA token...');
-  
   if (!URA_ACCESS_KEY) {
     throw new Error('URA_ACCESS_KEY environment variable is not set');
   }
 
-  try {
-    const response = await fetch(URA_TOKEN_URL, {
-      method: 'GET',
-      headers: {
-        'AccessKey': URA_ACCESS_KEY,
-        'User-Agent': 'Mozilla/5.0',
-      },
-    });
+  // Try each token URL
+  let lastError = null;
+  for (const tokenUrl of URA_TOKEN_URLS) {
+    try {
+      console.log(`🔑 Fetching token from ${tokenUrl}...`);
+      
+      const response = await fetchWithTimeout(tokenUrl, {
+        method: 'GET',
+        headers: {
+          'AccessKey': URA_ACCESS_KEY,
+          'User-Agent': 'Mozilla/5.0',
+        },
+      });
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Token API returned ${response.status}: ${text}`);
+      if (!response.ok) {
+        const text = await response.text();
+        console.warn(`⚠️ Token URL returned ${response.status}: ${text.substring(0, 100)}`);
+        lastError = new Error(`Token API returned ${response.status}`);
+        continue;
+      }
+
+      const data = await response.json();
+      console.log('🔑 Token response:', JSON.stringify(data).substring(0, 150));
+
+      const token = data.Result;
+      if (!token) {
+        console.warn(`⚠️ No token in response from ${tokenUrl}`);
+        lastError = new Error(`No token in response: ${JSON.stringify(data).substring(0, 100)}`);
+        continue;
+      }
+
+      tokenCache = { token, fetchedAt: Date.now() };
+      console.log(`✅ New token obtained from ${tokenUrl}`);
+      console.log(`   Preview: ${token.substring(0, 20)}...`);
+      console.log(`   Valid for ~23 hours`);
+      return token;
+
+    } catch (err) {
+      console.warn(`⚠️ Token fetch failed from ${tokenUrl}: ${err.message}`);
+      lastError = err;
+      continue;
     }
-
-    const data = await response.json();
-    console.log('🔑 Token API response:', JSON.stringify(data).substring(0, 200));
-
-    // URA returns token in "Result" field
-    const token = data.Result;
-    if (!token) {
-      throw new Error(`No token in response. Full response: ${JSON.stringify(data)}`);
-    }
-
-    tokenCache = {
-      token: token,
-      fetchedAt: Date.now(),
-    };
-
-    const expiresIn = Math.round(TOKEN_LIFETIME_MS / 1000 / 60 / 60);
-    console.log(`✅ New token obtained, valid for ~${expiresIn} hours`);
-    console.log(`   Token preview: ${token.substring(0, 20)}...`);
-    
-    return token;
-  } catch (err) {
-    console.error('❌ Token fetch failed:', err.message);
-    
-    // If we have an old token, try using it anyway
-    if (tokenCache.token) {
-      console.log('⚠️ Using expired token as fallback');
-      return tokenCache.token;
-    }
-    
-    throw err;
   }
+
+  // All URLs failed — try fallback to old token
+  if (tokenCache.token) {
+    console.log('⚠️ All token URLs failed, using expired token as fallback');
+    return tokenCache.token;
+  }
+
+  throw lastError || new Error('All token fetch attempts failed');
 }
 
 // ============================================================
 // DATA CACHE - Cache API responses for 1 hour
 // ============================================================
-const dataCache = new Map(); // key: "batch-N" → { data, fetchedAt }
-const DATA_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const dataCache = new Map();
+const DATA_CACHE_TTL = 60 * 60 * 1000;
 
 function getCachedData(key) {
   const cached = dataCache.get(key);
@@ -125,67 +150,55 @@ function setCachedData(key, data) {
 // ============================================================
 // URA API PROXY
 // ============================================================
-async function fetchURABatch(batch) {
-  const cacheKey = `batch-${batch}`;
-  
-  // Check cache first
+async function fetchURAData(url, cacheKey) {
   const cached = getCachedData(cacheKey);
   if (cached) {
-    console.log(`📦 Cache hit for batch ${batch}`);
+    console.log(`📦 Cache hit: ${cacheKey}`);
     return cached;
   }
 
-  // Get valid token
   const token = await getToken();
+  console.log(`📡 Fetching: ${cacheKey}...`);
 
-  console.log(`📡 Fetching URA batch ${batch}...`);
-  const url = `${URA_DATA_URL}?service=PMI_Resi_Transaction&batch=${batch}`;
-  
-  const response = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'AccessKey': URA_ACCESS_KEY,
-      'Token': token,
-      'User-Agent': 'Mozilla/5.0',
-    },
-  });
+  const headers = {
+    'AccessKey': URA_ACCESS_KEY,
+    'Token': token,
+    'User-Agent': 'Mozilla/5.0',
+  };
+
+  let response;
+  try {
+    response = await fetchWithTimeout(url, { method: 'GET', headers });
+  } catch (err) {
+    throw new Error(`Fetch failed for ${cacheKey}: ${err.message}`);
+  }
 
   if (!response.ok) {
-    const text = await response.text();
-    
     // If 401/403, token might be expired - force refresh and retry once
     if (response.status === 401 || response.status === 403) {
       console.log('🔄 Token rejected, forcing refresh...');
       tokenCache = { token: null, fetchedAt: null };
       const newToken = await getToken();
-      
-      const retryResponse = await fetch(url, {
+
+      const retryResponse = await fetchWithTimeout(url, {
         method: 'GET',
-        headers: {
-          'AccessKey': URA_ACCESS_KEY,
-          'Token': newToken,
-          'User-Agent': 'Mozilla/5.0',
-        },
+        headers: { ...headers, 'Token': newToken },
       });
-      
+
       if (!retryResponse.ok) {
-        throw new Error(`URA API batch ${batch} failed after retry: ${retryResponse.status}`);
+        throw new Error(`${cacheKey} failed after token retry: ${retryResponse.status}`);
       }
-      
+
       const retryData = await retryResponse.json();
       setCachedData(cacheKey, retryData);
       return retryData;
     }
-    
-    throw new Error(`URA API batch ${batch} returned ${response.status}: ${text.substring(0, 200)}`);
+
+    const text = await response.text().catch(() => '');
+    throw new Error(`${cacheKey} returned ${response.status}: ${text.substring(0, 200)}`);
   }
 
   const data = await response.json();
-  
-  const projectCount = data.Result?.length || 0;
-  const txnCount = data.Result?.reduce((sum, p) => sum + (p.transaction?.length || 0), 0) || 0;
-  console.log(`✅ Batch ${batch}: ${projectCount} projects, ${txnCount} transactions`);
-  
   setCachedData(cacheKey, data);
   return data;
 }
@@ -199,10 +212,10 @@ app.get('/', (req, res) => {
   res.json({
     status: 'ok',
     service: 'URA Property Analytics API',
-    version: '3.0.0',
+    version: '3.1.0',
     tokenStatus: isTokenValid() ? 'valid' : 'expired/missing',
-    tokenAge: tokenCache.fetchedAt 
-      ? `${Math.round((Date.now() - tokenCache.fetchedAt) / 1000 / 60)} minutes` 
+    tokenAge: tokenCache.fetchedAt
+      ? `${Math.round((Date.now() - tokenCache.fetchedAt) / 1000 / 60)} minutes`
       : 'no token',
     cachedBatches: [...dataCache.keys()],
     uptime: `${Math.round(process.uptime() / 60)} minutes`,
@@ -216,35 +229,34 @@ app.get('/api/transactions', async (req, res) => {
     if (batch < 1 || batch > 4) {
       return res.status(400).json({ error: 'Batch must be 1-4' });
     }
-    
-    const data = await fetchURABatch(batch);
+    const url = `${URA_DATA_URL}?service=PMI_Resi_Transaction&batch=${batch}`;
+    const data = await fetchURAData(url, `batch-${batch}`);
+
+    const projectCount = data.Result?.length || 0;
+    const txnCount = data.Result?.reduce((sum, p) => sum + (p.transaction?.length || 0), 0) || 0;
+    console.log(`✅ Batch ${batch}: ${projectCount} projects, ${txnCount} txns`);
+
     res.json(data);
   } catch (err) {
     console.error('❌ /api/transactions error:', err.message);
-    res.status(500).json({ 
-      error: err.message,
-      hint: 'Check URA_ACCESS_KEY is correct and URA API is accessible'
-    });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// Get all batches at once (convenience endpoint)
+// Get all batches at once
 app.get('/api/transactions/all', async (req, res) => {
   try {
     const allResults = [];
-    
     for (let batch = 1; batch <= 4; batch++) {
       try {
-        const data = await fetchURABatch(batch);
-        if (data.Result) {
-          allResults.push(...data.Result);
-        }
+        const url = `${URA_DATA_URL}?service=PMI_Resi_Transaction&batch=${batch}`;
+        const data = await fetchURAData(url, `batch-${batch}`);
+        if (data.Result) allResults.push(...data.Result);
       } catch (err) {
         console.warn(`⚠️ Batch ${batch} failed: ${err.message}`);
-        if (batch === 1) throw err; // First batch must succeed
+        if (batch === 1) throw err;
       }
     }
-    
     res.json({ Result: allResults, Status: 'Success' });
   } catch (err) {
     console.error('❌ /api/transactions/all error:', err.message);
@@ -252,49 +264,19 @@ app.get('/api/transactions/all', async (req, res) => {
   }
 });
 
-// Get rental data by refPeriod (e.g. 24q1, 23q4)
+// Get rental data by refPeriod
 app.get('/api/rentals', async (req, res) => {
   try {
     const refPeriod = req.query.refPeriod;
     if (!refPeriod) {
       return res.status(400).json({ error: 'refPeriod is required (e.g. 24q1)' });
     }
-
-    const cacheKey = `rental-${refPeriod}`;
-    const cached = getCachedData(cacheKey);
-    if (cached) {
-      return res.json(cached);
-    }
-
-    const token = await getToken();
     const url = `${URA_DATA_URL}?service=PMI_Resi_Rental&refPeriod=${refPeriod}`;
+    const data = await fetchURAData(url, `rental-${refPeriod}`);
 
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'AccessKey': URA_ACCESS_KEY,
-        'Token': token,
-        'User-Agent': 'Mozilla/5.0',
-      },
-    });
-
-    if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        tokenCache = { token: null, fetchedAt: null };
-        const newToken = await getToken();
-        const retry = await fetch(url, { method: 'GET', headers: { 'AccessKey': URA_ACCESS_KEY, 'Token': newToken, 'User-Agent': 'Mozilla/5.0' } });
-        if (!retry.ok) throw new Error(`Rental API failed after retry: ${retry.status}`);
-        const retryData = await retry.json();
-        setCachedData(cacheKey, retryData);
-        return res.json(retryData);
-      }
-      throw new Error(`Rental API returned ${response.status}`);
-    }
-
-    const data = await response.json();
     const count = data.Result?.reduce((sum, p) => sum + (p.rental?.length || 0), 0) || 0;
     console.log(`✅ Rentals ${refPeriod}: ${count} records`);
-    setCachedData(cacheKey, data);
+
     res.json(data);
   } catch (err) {
     console.error(`❌ /api/rentals error:`, err.message);
@@ -307,8 +289,8 @@ app.post('/api/refresh-token', async (req, res) => {
   try {
     tokenCache = { token: null, fetchedAt: null };
     const token = await getToken();
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: 'Token refreshed',
       tokenPreview: token.substring(0, 20) + '...',
     });
@@ -325,17 +307,37 @@ app.post('/api/refresh', async (req, res) => {
 
 // Debug endpoint
 app.get('/api/debug', async (req, res) => {
-  const info = {
+  res.json({
     accessKeySet: !!URA_ACCESS_KEY,
     accessKeyPreview: URA_ACCESS_KEY ? `${URA_ACCESS_KEY.substring(0, 8)}...` : 'NOT SET',
     tokenValid: isTokenValid(),
     tokenPreview: tokenCache.token ? `${tokenCache.token.substring(0, 20)}...` : 'none',
     tokenAge: tokenCache.fetchedAt ? `${Math.round((Date.now() - tokenCache.fetchedAt) / 1000 / 60)} min` : 'n/a',
-    cachedBatches: [...dataCache.keys()],
+    tokenSource: tokenCache.fetchedAt ? 'auto-fetched' : (process.env.URA_TOKEN ? 'env-var' : 'none'),
+    cachedData: [...dataCache.keys()],
     allowedOrigins,
     nodeVersion: process.version,
-  };
-  res.json(info);
+    fetchTimeout: `${FETCH_TIMEOUT_MS}ms`,
+  });
+});
+
+// Stats endpoint
+app.get('/api/stats', (req, res) => {
+  const now = Date.now();
+  res.json({
+    token: {
+      hasToken: !!tokenCache.token,
+      fetchedAt: tokenCache.fetchedAt ? new Date(tokenCache.fetchedAt).toISOString() : null,
+      expiresAt: tokenCache.fetchedAt ? new Date(tokenCache.fetchedAt + TOKEN_LIFETIME_MS).toISOString() : null,
+      hoursRemaining: tokenCache.fetchedAt ? Math.max(0, Math.round((tokenCache.fetchedAt + TOKEN_LIFETIME_MS - now) / 1000 / 60 / 60 * 10) / 10) : 0,
+      isValid: isTokenValid(),
+    },
+    cache: {
+      entries: dataCache.size,
+      keys: [...dataCache.keys()],
+    },
+    uptime: `${Math.round(process.uptime() / 60)} min`,
+  });
 });
 
 // ============================================================
@@ -345,12 +347,13 @@ app.listen(PORT, async () => {
   console.log(`\n🚀 Server running on port ${PORT}`);
   console.log(`📊 API: http://localhost:${PORT}/api/transactions?batch=1`);
   console.log(`🔍 Debug: http://localhost:${PORT}/api/debug`);
-  console.log(`🔑 AccessKey: ${URA_ACCESS_KEY ? URA_ACCESS_KEY.substring(0, 8) + '...' : '❌ NOT SET'}\n`);
-  
+  console.log(`🔑 AccessKey: ${URA_ACCESS_KEY ? URA_ACCESS_KEY.substring(0, 8) + '...' : '❌ NOT SET'}`);
+  console.log(`⏱️  Fetch timeout: ${FETCH_TIMEOUT_MS}ms\n`);
+
   // Pre-fetch token on startup
   if (URA_ACCESS_KEY) {
     try {
-      await getToken();
+      const token = await getToken();
       console.log('✅ Token ready on startup\n');
     } catch (err) {
       console.error('⚠️ Startup token fetch failed:', err.message);
