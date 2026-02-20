@@ -1,0 +1,2094 @@
+import axios from 'axios';
+import { saveToDisk, loadFromDisk, getCacheStatus, writeSnapshot } from './cache.js';
+
+// URA API URLs — eservice is the documented/working one
+const URA_URLS = [
+  'https://eservice.ura.gov.sg/uraDataService/invokeUraDS/v1',
+  'https://www.ura.gov.sg/uraDataService/invokeUraDS',
+];
+let workingUrl = null;
+
+const TOKEN_URLS = [
+  'https://eservice.ura.gov.sg/uraDataService/insertNewToken/v1',
+  'https://www.ura.gov.sg/uraDataService/insertNewToken.action',
+];
+
+// ═══ TOKEN ═══
+let token = { value: null, fetchedAt: null, expiresAt: null };
+
+export async function refreshToken() {
+  console.log('🔑 Refreshing URA token...');
+  for (const url of TOKEN_URLS) {
+    try {
+      const res = await axios.get(url, {
+        headers: { 'AccessKey': process.env.URA_ACCESS_KEY }
+      });
+      if (res.data?.Result) {
+        token.value = res.data.Result;
+        token.fetchedAt = new Date();
+        token.expiresAt = new Date(Date.now() + 23 * 3600000);
+        console.log(`✅ Token obtained via ${url.includes('eservice') ? 'eservice' : 'www'}`);
+        return token;
+      }
+    } catch (err) {
+      console.log(`  ⚠️ Token ${url.includes('eservice') ? 'eservice' : 'www'}: ${err.message}`);
+    }
+  }
+  throw new Error('Failed to get token from all URLs');
+}
+
+async function ensureToken() {
+  if (token.value && token.expiresAt && Date.now() < token.expiresAt) return token.value;
+  await refreshToken();
+  return token.value;
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function uraGet(params, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const t = await ensureToken();
+    const headers = { 'AccessKey': process.env.URA_ACCESS_KEY, 'Token': t };
+    try {
+      // If we already know which URL works, use it
+      if (workingUrl) {
+        const res = await axios.get(workingUrl, { params, headers, timeout: 30_000 });
+        return res.data?.Result || [];
+      }
+
+      // Try each URL until one works
+      for (const url of URA_URLS) {
+        try {
+          console.log(`  🌐 Trying ${url.replace('https://','').split('/')[0]}...`);
+          const res = await axios.get(url, { params, headers, timeout: 30_000 });
+          workingUrl = url;
+          console.log(`  ✅ Using ${url.replace('https://','').split('/')[0]}`);
+          return res.data?.Result || [];
+        } catch (err) {
+          if (err.response?.status === 404) continue;
+          throw err;
+        }
+      }
+      throw new Error('All URA API URLs returned 404');
+    } catch (err) {
+      const isLast = attempt === retries;
+      if (isLast) throw err;
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
+      console.warn(`  ⚠️ URA API attempt ${attempt}/${retries} failed: ${err.message}. Retrying in ${delay}ms...`);
+      // Reset token on auth failures so ensureToken() re-fetches
+      if (err.response?.status === 401 || err.response?.status === 403) {
+        token = { value: null, fetchedAt: null, expiresAt: null };
+        workingUrl = null;
+      }
+      await sleep(delay);
+    }
+  }
+}
+
+async function fetchBatch(service, batch) {
+  return uraGet({ service, batch });
+}
+
+async function fetchRental(refPeriod) {
+  return uraGet({ service: 'PMI_Resi_Rental', refPeriod });
+}
+
+// ═══ CACHE ═══
+let dashboardCache = null;
+let cacheTime = null;
+const CACHE_TTL = Infinity; // Never auto-expire — only refresh via POST /api/refresh
+let projectBatchMap = {};
+let projectCache = new Map(); // FIX #3: LRU project cache
+const PROJECT_CACHE_MAX = 20;
+
+// ═══ HELPERS ═══
+function parseDate(cd) {
+  if (!cd || cd.length < 4) return null;
+  const mm = parseInt(cd.slice(0, 2));
+  const yy = parseInt(cd.slice(2, 4));
+  if (mm < 1 || mm > 12) return null; // Invalid month
+  // URA format MMYY: handle pre-2000 dates (yy > 50 → 19xx, else 20xx)
+  const year = yy > 50 ? 1900 + yy : 2000 + yy;
+  return { year, quarter: `${String(year).slice(-2)}Q${Math.ceil(mm / 3)}`, month: mm };
+}
+
+function parseFloor(fr) {
+  if (!fr || fr === '-') return { band: null, mid: 0 };
+  // Handle both URA raw format "06 to 10" and stored band format "06-10"
+  let parts = fr.replace(/\s/g, '').split('to');
+  if (parts.length !== 2) parts = fr.split('-').map(s => s.trim());
+  if (parts.length === 2) {
+    const lo = parseInt(parts[0]) || 0, hi = parseInt(parts[1]) || 0;
+    if (lo > 0 && hi > 0) return { band: `${String(lo).padStart(2,'0')}-${String(hi).padStart(2,'0')}`, mid: (lo + hi) / 2 };
+  }
+  return { band: fr, mid: parseInt(fr) || 0 };
+}
+
+function distSort(a, b) {
+  return (parseInt(a.replace('D','')) || 0) - (parseInt(b.replace('D','')) || 0);
+}
+
+const avg = (sum, n) => n > 0 ? Math.round(sum / n) : 0;
+function med(arr) {
+  if (!arr.length) return 0;
+  const s = [...arr].sort((a,b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : Math.round((s[m-1] + s[m]) / 2);
+}
+
+// Estimated yields — ONLY used as last-resort fallback when URA rental API has no data
+const DEFAULT_YIELD = { CCR: 0.025, RCR: 0.028, OCR: 0.032 };
+let computedYield = null; // Filled from real URA rental data when available
+function getYield(seg) { return (computedYield || DEFAULT_YIELD)[seg] || 0.028; }
+function estRent(psf, seg) { return +(psf * getYield(seg) / 12).toFixed(2); }
+
+function domSeg(segCounts) {
+  let best = 'RCR', max = 0;
+  for (const [seg, n] of Object.entries(segCounts || {})) {
+    if (n > max) { max = n; best = seg; }
+  }
+  return best;
+}
+
+// ═══ FULL TRANSACTION STORES (for search/browse) ═══
+let salesStore = [];   // All sales tx, compact format (~15MB for 120K)
+let rentalStore = [];  // All rental tx from PMI_Resi_Rental
+let projYearData = {}; // Backend-only: project → { street, dist, seg, n, type, yearPsf } for nearby lookup
+let bedroomModel = null; // Area→bedroom inference from rental data
+
+/**
+ * Build bedroom inference model from rental data.
+ * Creates per-project and market-wide area ranges per bedroom count.
+ * When an area overlaps multiple bedroom types, returns "3/4" etc.
+ * Called once after rental data is loaded.
+ */
+function buildBedroomModel() {
+  const projAreas = {}; // project → { '1': [areas], '2': [areas], ... }
+  const mktAreas = {};  // market-wide: { '1': [areas], '2': [areas], ... }
+
+  for (const r of rentalStore) {
+    const br = r.br;
+    if (!br || br === '' || !/^\d+$/.test(br) || r.a <= 0) continue;
+    if (!projAreas[r.p]) projAreas[r.p] = {};
+    if (!projAreas[r.p][br]) projAreas[r.p][br] = [];
+    projAreas[r.p][br].push(r.a);
+    if (!mktAreas[br]) mktAreas[br] = [];
+    mktAreas[br].push(r.a);
+  }
+
+  // Build range lookup: each bedroom type gets [min, max] from actual rental records
+  const buildRanges = (areasByBed) => {
+    const entries = Object.entries(areasByBed)
+      .filter(([, areas]) => areas.length >= 3)
+      .map(([br, areas]) => {
+        const sorted = [...areas].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        return { br, min: sorted[0], max: sorted[sorted.length - 1], median, count: areas.length };
+      })
+      .sort((a, b) => a.median - b.median);
+    return entries.length >= 2 ? entries : null;
+  };
+
+  const projRanges = {};
+  for (const [proj, areasByBed] of Object.entries(projAreas)) {
+    const r = buildRanges(areasByBed);
+    if (r) projRanges[proj] = r;
+  }
+
+  const mktRanges = buildRanges(mktAreas);
+
+  bedroomModel = { projRanges, mktRanges };
+  const projCount = Object.keys(projRanges).length;
+  const mktBeds = mktRanges ? mktRanges.map(b => `${b.br}BR[${b.min}-${b.max}]`).join(', ') : 'none';
+  console.log(`  🛏️  Bedroom model: ${projCount} projects with project-level, market=[${mktBeds}]`);
+}
+
+/**
+ * Infer bedroom count from area using range overlap.
+ * If area falls within ranges of multiple bedroom types, returns "3/4" etc.
+ * Falls back to closest-median if no range matches.
+ * @param {string} project - Project name
+ * @param {number} area - Area in sqft
+ * @returns {string} Bedroom count (e.g. '1', '2', '3/4') or '' if unknown
+ */
+function inferBedrooms(project, area) {
+  if (!bedroomModel || area <= 0) return '';
+
+  const ranges = bedroomModel.projRanges[project] || bedroomModel.mktRanges;
+  if (!ranges) return '';
+
+  // Find all bedroom types whose observed range contains this area
+  const matches = ranges.filter(r => area >= r.min && area <= r.max);
+  if (matches.length === 1) return matches[0].br;
+  if (matches.length > 1) return matches.map(m => m.br).join('/');
+
+  // No exact range match → closest median fallback
+  let best = ranges[0];
+  let bestDist = Math.abs(area - best.median);
+  for (let i = 1; i < ranges.length; i++) {
+    const dist = Math.abs(area - ranges[i].median);
+    if (dist < bestDist) { bestDist = dist; best = ranges[i]; }
+  }
+  return best.br;
+}
+
+// ═══ FIX #1: Bounded sorted insert (no full array needed) ═══
+class TopN {
+  constructor(n, cmp) { this.n = n; this.cmp = cmp; this.items = []; }
+  add(item) {
+    if (this.items.length < this.n) {
+      this.items.push(item);
+      if (this.items.length === this.n) this.items.sort(this.cmp);
+    } else if (this.cmp(item, this.items[this.items.length - 1]) < 0) {
+      this.items[this.items.length - 1] = item;
+      // Binary insertion would be faster but this is only 500 items
+      this.items.sort(this.cmp);
+    }
+  }
+  result() { this.items.sort(this.cmp); return this.items; }
+}
+
+// ═══ AGGREGATOR ═══
+class Agg {
+  constructor() {
+    this.total = 0; this.vol = 0;
+    this.samples = [];
+    this.byYear = {}; this.byQtr = {};
+    this.bySeg = {}; this.byDist = {};
+    this.byType = {}; this.byTenure = {};
+    this.byProj = {}; this.byFloor = {};
+    // FIX #1: Bounded top-500 latest tx — no unbounded array
+    this.topTx = new TopN(500, (a, b) => b.date.localeCompare(a.date));
+  }
+
+  add(proj, batchNum) {
+    const txs = proj.transaction || [];
+    const name = proj.project || 'Unknown';
+    const street = proj.street || '';
+    const seg = (proj.marketSegment || 'RCR').toUpperCase();
+    projectBatchMap[name] = batchNum;
+
+    for (const tx of txs) {
+      const d = parseDate(tx.contractDate);
+      if (!d) continue;
+      const sqm = parseFloat(tx.area) || 0;
+      const area = Math.round(sqm * 10.7639);
+      const price = parseFloat(tx.price) || 0;
+      if (area <= 0 || price <= 0) continue;
+      const psf = Math.round(price / area);
+      if (psf <= 0 || psf > 50000) continue;
+
+      const fl = parseFloor(tx.floorRange);
+      const dist = `D${parseInt(tx.district) || 0}`;
+      const pType = tx.propertyType || 'Unknown';
+      let tenure = 'Leasehold';
+      if (tx.tenure) {
+        const t = tx.tenure.toLowerCase();
+        if (t.includes('freehold')) tenure = 'Freehold';
+        else if (t.includes('999')) tenure = '999-yr';
+      }
+
+      this.total++;
+      this.vol += price;
+
+      const y = String(d.year);
+
+      // Reservoir sampling
+      if (this.samples.length < 2000) {
+        this.samples.push({ psf, area, seg, dist, year: y });
+      } else {
+        const j = Math.floor(Math.random() * this.total);
+        if (j < 2000) this.samples[j] = { psf, area, seg, dist, year: y };
+      }
+
+      if (!this.byYear[y]) this.byYear[y] = { s: 0, n: 0, v: 0, p: [] };
+      const yb = this.byYear[y];
+      yb.s += psf; yb.n++; yb.v += price;
+      if (yb.p.length < 500) { yb.p.push(psf); }
+      else { const j = Math.floor(Math.random() * yb.n); if (j < 500) yb.p[j] = psf; }
+
+      const q = d.quarter;
+      if (!this.byQtr[q]) this.byQtr[q] = { s: 0, n: 0, v: 0, bySeg: {} };
+      const qb = this.byQtr[q];
+      qb.s += psf; qb.n++; qb.v += price;
+      if (!qb.bySeg[seg]) qb.bySeg[seg] = { s: 0, n: 0 };
+      qb.bySeg[seg].s += psf; qb.bySeg[seg].n++;
+
+      if (!this.bySeg[seg]) this.bySeg[seg] = { s: 0, n: 0, byY: {} };
+      this.bySeg[seg].s += psf; this.bySeg[seg].n++;
+      if (!this.bySeg[seg].byY[y]) this.bySeg[seg].byY[y] = { s: 0, n: 0 };
+      this.bySeg[seg].byY[y].s += psf; this.bySeg[seg].byY[y].n++;
+
+      if (!this.byDist[dist]) this.byDist[dist] = { s: 0, n: 0, v: 0, byY: {}, byQ: {}, segCounts: {} };
+      const dd = this.byDist[dist];
+      dd.s += psf; dd.n++; dd.v += price;
+      dd.segCounts[seg] = (dd.segCounts[seg] || 0) + 1;
+      if (!dd.byY[y]) dd.byY[y] = { s: 0, n: 0 }; dd.byY[y].s += psf; dd.byY[y].n++;
+      if (!dd.byQ[q]) dd.byQ[q] = { s: 0, n: 0 }; dd.byQ[q].s += psf; dd.byQ[q].n++;
+
+      if (!this.byType[pType]) this.byType[pType] = { s: 0, n: 0, segCounts: {}, byY: {} };
+      this.byType[pType].s += psf; this.byType[pType].n++;
+      this.byType[pType].segCounts[seg] = (this.byType[pType].segCounts[seg] || 0) + 1;
+      if (!this.byType[pType].byY[y]) this.byType[pType].byY[y] = { s: 0, n: 0 };
+      this.byType[pType].byY[y].s += psf; this.byType[pType].byY[y].n++;
+
+      if (!this.byTenure[tenure]) this.byTenure[tenure] = { s: 0, n: 0, byY: {} };
+      this.byTenure[tenure].s += psf; this.byTenure[tenure].n++;
+      if (!this.byTenure[tenure].byY[y]) this.byTenure[tenure].byY[y] = { s: 0, n: 0 };
+      this.byTenure[tenure].byY[y].s += psf; this.byTenure[tenure].byY[y].n++;
+
+      if (!this.byProj[name]) this.byProj[name] = { name, street, seg, dist, tenure: tx.tenure || '', pType, s: 0, n: 0, areas: [], prices: [], byY: {}, byFl: {}, latest: '' };
+      const bp = this.byProj[name];
+      bp.s += psf; bp.n++;
+      if (bp.areas.length < 50) bp.areas.push(area);
+      if (bp.prices.length < 50) { bp.prices.push(psf); }
+      else { const j = Math.floor(Math.random() * bp.n); if (j < 50) bp.prices[j] = psf; }
+      if (!bp.byY[y]) bp.byY[y] = { s: 0, n: 0 }; bp.byY[y].s += psf; bp.byY[y].n++;
+      if (fl.band) { if (!bp.byFl[fl.band]) bp.byFl[fl.band] = { s: 0, n: 0 }; bp.byFl[fl.band].s += psf; bp.byFl[fl.band].n++; }
+      const ds = `${d.year}-${String(d.month).padStart(2,'0')}`;
+      if (ds > bp.latest) bp.latest = ds;
+
+      if (fl.band) { if (!this.byFloor[fl.band]) this.byFloor[fl.band] = { s: 0, n: 0 }; this.byFloor[fl.band].s += psf; this.byFloor[fl.band].n++; }
+
+      // FIX #1: Bounded insert — only keeps top 500 by date, no unbounded array
+      const txDate = `${d.year}-${String(d.month).padStart(2,'0')}`;
+      this.topTx.add({ date: txDate, project: name, district: dist, segment: seg, type: pType, unit: fl.band || '-', area, floor: fl.mid, psf, price });
+
+      // Store ALL transactions for full browsing/search
+      salesStore.push({
+        d: txDate, p: name, st: street, di: dist, sg: seg,
+        a: area, pr: price, ps: psf, fl: fl.band || '-', fm: fl.mid,
+        tp: tx.typeOfSale === '1' ? 'New Sale' : tx.typeOfSale === '2' ? 'Sub Sale' : 'Resale',
+        pt: pType, tn: tenure,
+      });
+    }
+  }
+
+  _qtrYield(q) {
+    const qb = this.byQtr[q];
+    if (!qb || qb.n === 0) return 0.028;
+    let tw = 0;
+    for (const [seg, { n }] of Object.entries(qb.bySeg)) tw += getYield(seg) * n;
+    return tw / qb.n;
+  }
+
+  _overallYield() {
+    let tw = 0, tn = 0;
+    for (const [seg, { n }] of Object.entries(this.bySeg)) { tw += getYield(seg) * n; tn += n; }
+    return tn > 0 ? tw / tn : 0.028;
+  }
+
+  build(rentalData) {
+    const years = Object.keys(this.byYear).sort();
+    const qtrs = Object.keys(this.byQtr).sort();
+    const latY = years[years.length - 1];
+    const prevY = years.length > 1 ? years[years.length - 2] : null;
+
+    // Helper: prefer latest year from a byY structure, fallback to all-time
+    const latOr = (obj) => {
+      const ly = obj.byY?.[latY];
+      return ly && ly.n >= 3 ? avg(ly.s, ly.n) : avg(obj.s, obj.n);
+    };
+
+    // ── Rolling window for stat cards (consistent for both sales and rental) ──
+    // Fallback chain: 3M → 6M → 12M → latest year
+    const now3M = new Date();
+
+    let salesWindow, psfPeriod;
+    for (const months of [3, 6, 12]) {
+      const mAgo = new Date(now3M.getFullYear(), now3M.getMonth() - (months - 1), 1);
+      const cutoff = `${mAgo.getFullYear()}-${String(mAgo.getMonth() + 1).padStart(2, '0')}`;
+      const filtered = salesStore.filter(r => r.d >= cutoff);
+      if (filtered.length >= 20) {
+        salesWindow = filtered;
+        psfPeriod = `${months}M`;
+        break;
+      }
+    }
+    if (!salesWindow) {
+      // Fall back to latest year
+      salesWindow = salesStore.filter(r => r.d.startsWith(latY));
+      if (salesWindow.length === 0) salesWindow = salesStore;
+      psfPeriod = latY;
+    }
+    const avgPsf = salesWindow.length > 0
+      ? Math.round(salesWindow.reduce((s, r) => s + r.ps, 0) / salesWindow.length)
+      : avg(this.byYear[latY]?.s || 0, this.byYear[latY]?.n || this.total);
+    const medPsf = salesWindow.length > 0
+      ? med(salesWindow.map(r => r.ps))
+      : (this.byYear[latY]?.p?.length > 0 ? med(this.byYear[latY].p) : med(this.samples.map(s => s.psf)));
+
+    // Latest-year samples for area estimates (fallback to all if < 50 samples)
+    const latSamples = this.samples.filter(s => s.year === latY);
+    const recentSamples = latSamples.length >= 50 ? latSamples : this.samples;
+    const avgArea = recentSamples.length > 0 ? Math.round(recentSamples.reduce((s,p) => s + p.area, 0) / recentSamples.length) : 0;
+
+    // YoY: compare full latest year vs full previous year (consistent with YoY trend chart)
+    const latYAvg = this.byYear[latY] ? avg(this.byYear[latY].s, this.byYear[latY].n) : avgPsf;
+    const prvAvg = prevY && this.byYear[prevY] ? avg(this.byYear[prevY].s, this.byYear[prevY].n) : 0;
+    const yoyPct = prvAvg > 0 ? +((latYAvg / prvAvg - 1) * 100).toFixed(1) : null;
+    const overallYield = this._overallYield();
+
+    // FIX #2: Use real rental data if available
+    const hasRental = rentalData && rentalData.byProject && Object.keys(rentalData.byProject).length > 0;
+
+    // Compute real yield per segment — rolling 3M window for both sale and rental
+    if (hasRental) {
+      computedYield = {};
+
+      // Sale PSF by segment for the same window
+      const salePsfW = {};
+      for (const r of salesWindow) {
+        if (!salePsfW[r.sg]) salePsfW[r.sg] = { s: 0, n: 0 };
+        salePsfW[r.sg].s += r.ps;
+        salePsfW[r.sg].n++;
+      }
+
+      // Rental PSF by segment — use same expansion logic
+      const rentPsfW = {};
+      let rentalWindow;
+      for (const months of [3, 6, 12]) {
+        const mAgo = new Date(now3M.getFullYear(), now3M.getMonth() - (months - 1), 1);
+        const cutoff = `${mAgo.getFullYear()}-${String(mAgo.getMonth() + 1).padStart(2, '0')}`;
+        const filtered = rentalStore.filter(r => r.d >= cutoff);
+        if (filtered.length >= 20) { rentalWindow = filtered; break; }
+      }
+      if (!rentalWindow) rentalWindow = rentalStore; // Use all available
+      for (const r of rentalWindow) {
+        if (!rentPsfW[r.sg]) rentPsfW[r.sg] = { s: 0, n: 0 };
+        rentPsfW[r.sg].s += r.rp;
+        rentPsfW[r.sg].n++;
+      }
+
+      // Compute yield = (rentPsf × 12) / salePsf per segment
+      let fallbackYield = 0;
+      let fallbackCount = 0;
+      for (const seg of ['CCR', 'RCR', 'OCR']) {
+        const sp = salePsfW[seg]?.n > 0 ? avg(salePsfW[seg].s, salePsfW[seg].n) : 0;
+        const rp = rentPsfW[seg]?.n > 0 ? +(rentPsfW[seg].s / rentPsfW[seg].n).toFixed(2) : 0;
+        if (sp > 0 && rp > 0) {
+          computedYield[seg] = (rp * 12) / sp;
+          fallbackYield += computedYield[seg] * (salePsfW[seg]?.n || 1);
+          fallbackCount += salePsfW[seg]?.n || 1;
+        }
+      }
+      const avgYieldFallback = fallbackCount > 0 ? fallbackYield / fallbackCount : 0.028;
+      for (const seg of ['CCR', 'RCR', 'OCR']) {
+        if (!computedYield[seg]) computedYield[seg] = avgYieldFallback;
+      }
+      console.log(`📊 Real yields (${psfPeriod}):`, Object.entries(computedYield).map(([k,v])=>`${k}: ${(v*100).toFixed(2)}%`).join(', '));
+    } else {
+      computedYield = null;
+      console.log('⚠️ No rental data — using estimated yields');
+    }
+
+    // ── Rental stats — same fallback chain: 3M → 6M → 12M → all ──
+    let rentalStatWindow, rentalPeriodLabel;
+    for (const months of [3, 6, 12]) {
+      const mAgo = new Date(now3M.getFullYear(), now3M.getMonth() - (months - 1), 1);
+      const cutoff = `${mAgo.getFullYear()}-${String(mAgo.getMonth() + 1).padStart(2, '0')}`;
+      const filtered = rentalStore.filter(r => r.d >= cutoff);
+      if (filtered.length >= 20) { rentalStatWindow = filtered; rentalPeriodLabel = `${months}M`; break; }
+    }
+    if (!rentalStatWindow) { rentalStatWindow = rentalStore; rentalPeriodLabel = 'all'; }
+    const latRentalTotal = rentalStatWindow.length;
+    const latRentalAvgRent = latRentalTotal > 0 ? Math.round(rentalStatWindow.reduce((s, r) => s + r.rn, 0) / latRentalTotal) : null;
+    const latRentalAvgPsf = latRentalTotal > 0 ? +(rentalStatWindow.reduce((s, r) => s + r.rp, 0) / latRentalTotal).toFixed(2) : null;
+    const latRentalMed = latRentalTotal > 0 ? med(rentalStatWindow.map(r => r.rn)) : null;
+    const latRentalSegCounts = {};
+    for (const r of rentalStatWindow) latRentalSegCounts[r.sg] = (latRentalSegCounts[r.sg] || 0) + 1;
+
+    // ─── YoY ───
+    const yoy = years.map((y, i) => {
+      const b = this.byYear[y];
+      const a = avg(b.s, b.n);
+      const m = med(b.p);
+      const pa = i > 0 ? avg(this.byYear[years[i-1]].s, this.byYear[years[i-1]].n) : null;
+      return { year: y, avg: a, med: m, yoy: pa ? +((a / pa - 1) * 100).toFixed(1) : null };
+    });
+
+    // ─── Rental trend — real data if available, else estimated ───
+    const rTrend = qtrs.slice(-8).map((q, i) => {
+      const qb = this.byQtr[q];
+      const a = avg(qb.s, qb.n);
+      // Check for real rental data for this quarter
+      const qKey = q.replace('Q','q'); // "24Q1" -> "24q1"
+      const realQ = hasRental && rentalData.byQtr[qKey];
+      const rent = realQ ? realQ.avgRent : Math.round(a * this._qtrYield(q) / 12 * avgArea);
+      const rentMed = realQ ? realQ.medRent : rent; // Without real data, median estimate = avg estimate
+      const pq = i > 0 ? qtrs.slice(-8)[i-1] : null;
+      let pRent = null;
+      if (pq) {
+        const pqKey = pq.replace('Q','q');
+        const realPQ = hasRental && rentalData.byQtr[pqKey];
+        pRent = realPQ ? realPQ.avgRent : Math.round(avg(this.byQtr[pq].s, this.byQtr[pq].n) * this._qtrYield(pq) / 12 * avgArea);
+      }
+      return { q, avg: rent, med: rentMed, qoq: pRent ? +((rent / pRent - 1) * 100).toFixed(1) : null, real: !!realQ };
+    });
+
+    // ─── Segments ───
+    const sSeg = ['CCR','RCR','OCR'].map(s => ({
+      name: s, val: this.bySeg[s] ? latOr(this.bySeg[s]) : 0, count: this.bySeg[s]?.n || 0,
+    })).filter(s => s.count > 0);
+    const rSeg = sSeg.map(s => {
+      if (hasRental && rentalData.bySeg[s.name]) {
+        return { name: s.name, val: rentalData.bySeg[s.name].avgRent, count: rentalData.bySeg[s.name].count };
+      }
+      return { name: s.name, val: 0, count: 0 };
+    });
+
+    const sTop = Object.values(this.byProj).sort((a,b) => b.n - a.n).slice(0, 8).map(p => ({ n: p.name, c: p.n }));
+    // FIX #5: Real rental top projects ranked by rental volume
+    let rTop;
+    if (hasRental) {
+      rTop = Object.entries(rentalData.byProject)
+        .map(([name, rp]) => ({ n: name, c: rp.count }))
+        .sort((a, b) => b.c - a.c).slice(0, 8);
+      if (rTop.length === 0) rTop = sTop; // Fallback
+    } else {
+      rTop = sTop;
+    }
+
+    const dNames = Object.keys(this.byDist).sort(distSort);
+    const topDist = Object.entries(this.byDist).sort((a,b) => b[1].n - a[1].n).slice(0, 5).map(([d]) => d);
+
+    const sDistLine = qtrs.slice(-8).map(q => {
+      const row = { q };
+      topDist.forEach(d => { const dq = this.byDist[d]?.byQ[q]; row[d] = dq ? avg(dq.s, dq.n) : null; });
+      return row;
+    });
+    const rDistLine = sDistLine.map(row => {
+      const r = { q: row.q };
+      // Convert sale quarter format (e.g. "24Q1") to rental format (e.g. "24q1")
+      const rqKey = row.q.replace('Q','q');
+      topDist.forEach(d => {
+        if (hasRental && rentalData.byDist[d]?.byQ?.[rqKey]) {
+          r[d] = rentalData.byDist[d].byQ[rqKey].avgRentPsf;
+        } else if (hasRental && rentalData.byDist[d]) {
+          // Fall back to overall district average if quarter data missing
+          r[d] = rentalData.byDist[d].avgRentPsf || null;
+        } else {
+          r[d] = null;
+        }
+      });
+      return r;
+    });
+
+    // C1 FIX: Use LATEST YEAR PSF for "current" charts, not all-time average
+    const latYKey = latY; // Latest year in dataset
+    const sDistBar = dNames.map(d => {
+      // Prefer latest year's average; fall back to all-time if no data in latest year
+      const latD = this.byDist[d]?.byY[latYKey];
+      const v = latD ? avg(latD.s, latD.n) : avg(this.byDist[d].s, this.byDist[d].n);
+      return { d, v };
+    }).sort((a,b) => b.v - a.v).slice(0, 10);
+    const rDistBar = sDistBar.map(d => {
+      if (hasRental && rentalData.byDist[d.d]) return { d: d.d, v: rentalData.byDist[d.d].avgRentPsf };
+      return { d: d.d, v: 0 };
+    });
+
+    const sType = Object.entries(this.byType).map(([t, v]) => ({ t, v: latOr(v) })).sort((a,b) => b.v - a.v).slice(0, 5);
+    const rType = sType.map(t => {
+      // Use real rental data: find projects of this type and average their rent
+      if (hasRental) {
+        const projsOfType = Object.values(this.byProj).filter(p => p.pType === t.t);
+        const rents = projsOfType.map(p => rentalData.byProject[p.name]).filter(Boolean);
+        if (rents.length > 0) {
+          const totalRent = rents.reduce((s,r) => s + r.avgRent * r.count, 0);
+          const totalCount = rents.reduce((s,r) => s + r.count, 0);
+          if (totalCount > 0) return { t: t.t, v: Math.round(totalRent / totalCount) };
+        }
+      }
+      return { t: t.t, v: 0 };
+    });
+    const sTenure = Object.entries(this.byTenure).map(([t, v]) => ({ t, v: latOr(v) })).sort((a,b) => b.v - a.v);
+
+    // Histogram — use recent samples for current market distribution
+    const psfVals = recentSamples.map(s => s.psf);
+    const pMin = Math.floor(psfVals.reduce((a,b) => a < b ? a : b, Infinity) / 200) * 200;
+    const pMax = Math.ceil(psfVals.reduce((a,b) => a > b ? a : b, 0) / 200) * 200;
+    const sHist = [];
+    for (let r = pMin; r < pMax; r += 200) sHist.push({ r: `$${r}`, c: psfVals.filter(p => p >= r && p < r + 200).length });
+
+    const sScat = (() => {
+      // Shuffle recent samples to remove early-batch bias before taking scatter points
+      const shuffled = [...recentSamples];
+      for (let i = shuffled.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]; }
+      return shuffled.slice(0, 200).map(s => ({ a: s.area, p: s.psf, s: s.seg }));
+    })();
+
+    // Rental histogram & scatter: use REAL rental data when available
+    let rHist, rScat;
+    if (rentalStore.length > 0) {
+      const realRents = rentalStore.slice(0, 2000).map(r => r.rn);
+      const rMin = Math.floor(Math.min(...realRents) / 500) * 500;
+      const rMax = Math.ceil(Math.max(...realRents) / 500) * 500;
+      rHist = [];
+      for (let r = rMin; r < rMax; r += 500) rHist.push({ r: `$${r}`, c: realRents.filter(p => p >= r && p < r + 500).length });
+      rScat = rentalStore.slice(0, 200).map(r => ({ a: r.a, p: r.rp, s: r.sg }));
+    } else {
+      rHist = [];
+      rScat = [];
+    }
+    const sCum = qtrs.slice(-12).map(q => ({ d: q, v: this.byQtr[q]?.v || 0 }));
+    const rCum = qtrs.slice(-12).map(q => {
+      const rqKey = q.replace('Q','q');
+      const realQ = hasRental && rentalData.byQtr[rqKey];
+      return { d: q, v: realQ ? realQ.count : 0 };
+    });
+
+    // Investment: Yield uses real rental if available
+    // C1 FIX: Use LATEST YEAR PSF as buy price denominator (not all-time avg)
+    const ydAll = dNames.map(d => {
+      const b = this.byDist[d];
+      const latD = b.byY[latY];
+      const bp = latD ? avg(latD.s, latD.n) : avg(b.s, b.n); // Latest year > all-time
+      const dSeg = domSeg(b.segCounts);
+      let yld, rp;
+      if (hasRental && rentalData.byDist[d]) {
+        rp = rentalData.byDist[d].avgRentPsf;
+        yld = bp > 0 ? +((rp * 12 / bp) * 100).toFixed(2) : 0;  // REAL yield from real rent / real price
+      } else {
+        yld = 0;
+        rp = 0;
+      }
+      return { d, rp, bp, y: yld, seg: dSeg };
+    }).filter(d => d.bp > 0);
+    const yd = [...ydAll].filter(d => d.y > 0).sort((a,b) => b.y - a.y).slice(0, 8);
+
+    // Fixed 5-year CAGR window: consistent timeframe across all districts (e.g. 2020→2025)
+    const CAGR_WINDOW = 5;
+    const eY = years[years.length - 1];
+    const sY = String(parseInt(eY) - CAGR_WINDOW);
+    const cagrData = dNames.map(d => {
+      const b = this.byDist[d];
+      const sA = b.byY[sY] ? avg(b.byY[sY].s, b.byY[sY].n) : null;
+      const eA = b.byY[eY] ? avg(b.byY[eY].s, b.byY[eY].n) : null;
+      if (!sA || !eA) return null;
+      const lowConf = (b.byY[sY]?.n || 0) < 3 || (b.byY[eY]?.n || 0) < 3;
+      const cagr = +((Math.pow(eA / sA, 1 / CAGR_WINDOW) - 1) * 100).toFixed(1);
+      const yRec = ydAll.find(y => y.d === d);
+      const yld = yRec ? yRec.y : 0;
+      return { d, cagr, y: yld, seg: domSeg(b.segCounts), bp: eA, total: +(cagr + yld).toFixed(2), cagrYears: CAGR_WINDOW, lowConf };
+    }).filter(Boolean).sort((a,b) => b.total - a.total).slice(0, 8);
+
+    // District performance table: ALL districts with 5-year CAGR + absolute returns
+    const distPerf = dNames.map(d => {
+      const b = this.byDist[d];
+      const sA = b.byY[sY] ? avg(b.byY[sY].s, b.byY[sY].n) : null;
+      const eA = b.byY[eY] ? avg(b.byY[eY].s, b.byY[eY].n) : null;
+      if (!sA || !eA || sA <= 0) return null;
+      const sTx = b.byY[sY]?.n || 0;
+      const eTx = b.byY[eY]?.n || 0;
+      const lowConf = sTx < 3 || eTx < 3;
+      const absDiff = Math.round(eA - sA);
+      const pctChg = +((eA / sA - 1) * 100).toFixed(1);
+      const cagr = +((Math.pow(eA / sA, 1 / CAGR_WINDOW) - 1) * 100).toFixed(1);
+      const yRec = ydAll.find(y => y.d === d);
+      const yld = yRec ? yRec.y : 0;
+      const totalReturn = +(cagr + yld).toFixed(2);
+      return {
+        d, seg: domSeg(b.segCounts),
+        startPsf: Math.round(sA), endPsf: Math.round(eA),
+        absDiff, pctChg, cagr, yield: yld, totalReturn,
+        startYear: sY, endYear: eY, window: CAGR_WINDOW,
+        txStart: sTx, txEnd: eTx, txTotal: b.n, lowConf,
+      };
+    }).filter(Boolean).sort((a, b) => b.cagr - a.cagr);
+
+    // Project performance table: projects with data in both start and end years
+    const projPerf = Object.values(this.byProj).map(p => {
+      if (p.n < 5) return null; // need meaningful sample
+      const sD = p.byY[sY]; const eD = p.byY[eY];
+      if (!sD || !eD) return null;
+      const sA = avg(sD.s, sD.n); const eA = avg(eD.s, eD.n);
+      if (sA <= 0 || eA <= 0) return null;
+      const lowConf = sD.n < 2 || eD.n < 2;
+      const absDiff = Math.round(eA - sA);
+      const pctChg = +((eA / sA - 1) * 100).toFixed(1);
+      const cagr = +((Math.pow(eA / sA, 1 / CAGR_WINDOW) - 1) * 100).toFixed(1);
+      const rp = hasRental ? rentalData?.byProject?.[p.name] : null;
+      const yld = rp && eA > 0 ? +((rp.avgRentPsf * 12 / eA) * 100).toFixed(2) : 0;
+      const totalReturn = +(cagr + yld).toFixed(2);
+      return {
+        name: p.name, dist: p.dist, seg: p.seg, street: p.street || '',
+        startPsf: Math.round(sA), endPsf: Math.round(eA),
+        absDiff, pctChg, cagr, yield: yld, totalReturn,
+        startYear: sY, endYear: eY, window: CAGR_WINDOW,
+        txStart: sD.n, txEnd: eD.n, txTotal: p.n, lowConf,
+      };
+    }).filter(Boolean).sort((a, b) => b.cagr - a.cagr);
+    const mktSaleTx = this.topTx.result();
+    // Market rental transactions: use REAL rental records from URA
+    const mktRentTx = rentalStore.length > 0
+      ? [...rentalStore].sort((a, b) => b.d.localeCompare(a.d)).slice(0, 500).map(r => ({
+          date: r.d, project: r.p, district: r.di, segment: r.sg, unit: '-',
+          area: r.af, bedrooms: r.br || '', floor: 0, rent: r.rn, rentPsf: r.rp,
+        }))
+      : [];
+
+    // FIX #4: Comparison pool includes per-year PSF for heatmap
+    // C1 FIX: Use LATEST YEAR PSF as primary price (not all-time avg)
+    const cmpPool = Object.values(this.byProj).filter(p => p.n >= 5).sort((a,b) => b.n - a.n).slice(0, 30).map(p => {
+      const allTimeAvg = avg(p.s, p.n);
+      // Prefer latest year average as the "current" PSF
+      const latestProjYear = Object.keys(p.byY).sort().pop();
+      const latestYearData = latestProjYear ? p.byY[latestProjYear] : null;
+      const ap = latestYearData ? avg(latestYearData.s, latestYearData.n) : allTimeAvg;
+      const aa = p.areas.length > 0 ? Math.round(p.areas.reduce((s,a) => s + a, 0) / p.areas.length) : avgArea;
+      const rp = hasRental ? rentalData.byProject[p.name] : null;
+      const rent = rp ? Math.round(rp.avgRent / 100) * 100 : 0;
+      const yld = rp && ap > 0 ? +((rp.avgRentPsf * 12 / ap) * 100).toFixed(2) : 0;
+      // FIX #4: Include per-year avg PSF for comparison heatmap
+      const yearPsf = {};
+      for (const [y, yData] of Object.entries(p.byY)) {
+        yearPsf[y] = avg(yData.s, yData.n);
+      }
+      return {
+        name: p.name, psf: ap, rent, yield: yld, dist: p.dist,
+        street: p.street || '',
+        age: Object.keys(p.byY).sort()[0] || '',
+        type: p.pType, units: p.n, segment: p.seg,
+        yearPsf,
+      };
+    });
+    const projList = Object.values(this.byProj).filter(p => p.n >= 3).sort((a,b) => b.n - a.n).map(p => p.name);
+
+    // ─── Project Index: lightweight metadata for ALL projects (search preview + getProjectData fallback) ───
+    const projIndex = {};
+    projYearData = {}; // Reset and rebuild
+    for (const p of Object.values(this.byProj)) {
+      if (p.n < 3) continue;
+      const latestY = Object.keys(p.byY).sort().pop();
+      const latYData = latestY ? p.byY[latestY] : null;
+      const psfVal = latYData ? avg(latYData.s, latYData.n) : avg(p.s, p.n);
+      const rp = hasRental ? rentalData?.byProject?.[p.name] : null;
+      const yld = rp && psfVal > 0 ? +((rp.avgRentPsf * 12 / psfVal) * 100).toFixed(2) : 0;
+      projIndex[p.name] = { dist: p.dist, seg: p.seg, psf: psfVal, n: p.n, yield: yld, street: p.street, type: p.pType };
+      // Backend-only: store yearPsf for nearby comparison (not sent to frontend in dashboard payload)
+      const yearPsf = {};
+      for (const [y, yData] of Object.entries(p.byY)) { yearPsf[y] = avg(yData.s, yData.n); }
+      // Also store yearPsf in projIndex for frontend (search-added projects need heatmap data)
+      projIndex[p.name].yearPsf = yearPsf;
+      for (const [y, yData] of Object.entries(p.byY)) { yearPsf[y] = avg(yData.s, yData.n); }
+      projYearData[p.name] = { street: p.street, dist: p.dist, seg: p.seg, n: p.n, type: p.pType, psf: psfVal, yield: yld, yearPsf };
+    }
+
+    // ─── District Top PSF: highest-PSF projects per district ───
+    const distGroups = {};
+    for (const p of Object.values(this.byProj)) {
+      if (p.n < 3) continue; // Skip projects with too few transactions
+      const d = p.dist;
+      if (!distGroups[d]) distGroups[d] = [];
+      // Use latest year PSF if available, else all-time
+      const latestY = Object.keys(p.byY).sort().pop();
+      const latYData = latestY ? p.byY[latestY] : null;
+      const psfVal = latYData ? avg(latYData.s, latYData.n) : avg(p.s, p.n);
+      const rp = hasRental ? rentalData?.byProject?.[p.name] : null;
+      const yld = rp && psfVal > 0 ? +((rp.avgRentPsf * 12 / psfVal) * 100).toFixed(2) : 0;
+      distGroups[d].push({ name: p.name, psf: psfVal, n: p.n, seg: p.seg, street: p.street, tenure: p.tenure, yield: yld, latest: p.latest || '' });
+    }
+    const distTopPsf = Object.entries(distGroups).map(([d, projs]) => {
+      projs.sort((a, b) => b.psf - a.psf);
+      const dAvg = Math.round(projs.reduce((s, p) => s + p.psf, 0) / projs.length);
+      const dSeg = domSeg(this.byDist[d]?.segCounts);
+      return { dist: d, seg: dSeg, avgPsf: dAvg, topPsf: projs[0].psf, topProject: projs[0].name, count: projs.length, projects: projs.slice(0, 15) };
+    }).sort((a, b) => b.topPsf - a.topPsf);
+
+
+    // Sort once for all percentile lookups — use recent samples for current market percentiles
+    const sortedPsf = recentSamples.map(s => s.psf).sort((a, b) => a - b);
+    const pctl = (p) => sortedPsf.length > 10 ? sortedPsf[Math.floor(sortedPsf.length * p)] : 0;
+
+    return {
+      totalTx: this.total, avgPsf, medPsf, yoyPct, latestYear: latY, psfPeriod,
+      totalVolume: this.vol,
+      avgRent: latRentalAvgRent || Math.round(avgPsf * overallYield / 12 * avgArea),
+      avgRentPsf: latRentalAvgPsf || +(avgPsf * overallYield / 12).toFixed(2),
+      bestYield: yd[0] || null, hasRealRental: hasRental,
+      // Overview summary fields
+      segCounts: { CCR: this.bySeg['CCR']?.n || 0, RCR: this.bySeg['RCR']?.n || 0, OCR: this.bySeg['OCR']?.n || 0 },
+      rentalTotal: latRentalTotal,
+      rentalPeriod: rentalPeriodLabel, // Independent rental window (may differ from sale psfPeriod)
+      rentalSegCounts: { CCR: latRentalSegCounts['CCR'] || 0, RCR: latRentalSegCounts['RCR'] || 0, OCR: latRentalSegCounts['OCR'] || 0 },
+      medRent: latRentalMed || Math.round(avgPsf * overallYield / 12 * avgArea),
+      psfP5: pctl(0.05), psfP95: pctl(0.95), psfP25: pctl(0.25), psfP75: pctl(0.75),
+      years, quarters: qtrs, topDistricts: topDist, districtNames: dNames,
+      yoy, rTrend, sSeg, rSeg, sTop, rTop,
+      sDistLine, rDistLine, sDistBar, rDistBar,
+      sType, rType, sTenure,
+      sHist, rHist, sScat, rScat, sCum, rCum,
+      yd, cagrData, distPerf, projPerf,
+      avgCagr: distPerf.length > 0 ? +(distPerf.reduce((s,d) => s + d.cagr, 0) / distPerf.length).toFixed(1) : 0,
+      avgYield: yd.length > 0 ? +(yd.reduce((s,d) => s + d.y, 0) / yd.length).toFixed(2) : 0,
+      mktSaleTx, mktRentTx, cmpPool, projList, projIndex, distTopPsf,
+    };
+  }
+}
+
+// ═══ FIX #2: FETCH & AGGREGATE REAL RENTAL DATA ═══
+
+async function fetchRentalData() {
+  console.log('🏠 Fetching rental data...');
+  const byProject = {};
+  const byDist = {};
+  const bySeg = {};
+  const byQtr = {};
+  let totalRent = 0, totalRentPsf = 0, totalCount = 0;
+  const allRents = []; // For computing real overall median
+
+  // Build project→segment lookup from sales data (already populated)
+  // URA's rental API does NOT include marketSegment, so we must map from sales
+  const projSegLookup = {};
+  for (const s of salesStore) {
+    if (!projSegLookup[s.p]) projSegLookup[s.p] = s.sg;
+  }
+
+  // Generate recent quarter keys (last 4 quarters = 12M, consistent with sale PSF window)
+  const now = new Date();
+  const curY = now.getFullYear() % 100;
+  const curQ = Math.ceil((now.getMonth() + 1) / 3);
+  const quarters = [];
+  for (let i = 0; i < 4; i++) {
+    let qy = curY, qq = curQ - i;
+    while (qq <= 0) { qq += 4; qy--; }
+    quarters.push(`${String(qy).padStart(2,'0')}q${qq}`);
+  }
+
+  for (const refPeriod of quarters) {
+    try {
+      const projects = await fetchRental(refPeriod);
+      console.log(`  📥 Rental ${refPeriod}: ${projects.length} projects`);
+      for (const p of projects) {
+        const name = p.project || '';
+        // Prefer sales-derived segment (rental API often lacks marketSegment)
+        const seg = projSegLookup[name] || (p.marketSegment || 'RCR').toUpperCase();
+        const dist = `D${parseInt(p.district) || 0}`;
+        const rentals = p.rental || [];
+
+        for (const r of rentals) {
+          // URA provides both areaSqm ("150-200") and areaSqft ("1500-2000") as ranges
+          // Use areaSqft directly for accuracy; fall back to areaSqm conversion
+          const sqftStr = r.areaSqft || '';
+          const sqftParts = sqftStr.split('-').map(v => parseFloat(v) || 0);
+          let areaSqf = sqftParts.length === 2 && sqftParts[0] > 0
+            ? Math.round((sqftParts[0] + sqftParts[1]) / 2)
+            : 0;
+          // Fallback: convert from sqm if areaSqft missing
+          if (areaSqf <= 0) {
+            const sqmParts = String(r.areaSqm || '').split('-').map(v => parseFloat(v) || 0);
+            const areaSqm = sqmParts.length === 2 ? (sqmParts[0] + sqmParts[1]) / 2 : sqmParts[0] || 0;
+            areaSqf = Math.round(areaSqm * 10.7639);
+          }
+          const monthlyRent = parseFloat(r.rent) || 0;
+          const numContracts = parseInt(r.noOfRentalContract) || 0;
+          const bedrooms = r.noOfBedRoom || '';
+          if (areaSqf <= 0 || monthlyRent <= 0) continue;
+
+          // Parse leaseDate (MMYY format, same as sales contractDate) for precise month
+          const ld = parseDate(r.leaseDate);
+          // Fallback: derive YYYY-MM from refPeriod quarter (e.g. "26q1" → "2026-02")
+          const fallbackDate = (() => {
+            const qy = parseInt(refPeriod.slice(0, 2)) || 0;
+            const qq = parseInt(refPeriod.slice(-1)) || 1;
+            const fy = qy > 50 ? 1900 + qy : 2000 + qy;
+            const fm = (qq - 1) * 3 + 2; // mid-month of quarter
+            return `${fy}-${String(fm).padStart(2, '0')}`;
+          })();
+          const rentalDate = ld ? `${ld.year}-${String(ld.month).padStart(2, '0')}` : fallbackDate;
+          const rentalQtr = ld ? ld.quarter.replace('Q', 'q') : refPeriod;
+
+          const rentPsf = +(monthlyRent / areaSqf).toFixed(2);
+
+          totalRent += monthlyRent;
+          totalRentPsf += rentPsf;
+          totalCount++;
+          if (allRents.length < 5000) allRents.push(monthlyRent);
+          else { const j = Math.floor(Math.random() * totalCount); if (j < 5000) allRents[j] = monthlyRent; }
+
+          if (!byProject[name]) byProject[name] = { totalRent: 0, totalPsf: 0, count: 0, seg, dist };
+          byProject[name].totalRent += monthlyRent;
+          byProject[name].totalPsf += rentPsf;
+          byProject[name].count++;
+
+          if (!byDist[dist]) byDist[dist] = { totalRent: 0, totalPsf: 0, count: 0, byQ: {} };
+          byDist[dist].totalRent += monthlyRent;
+          byDist[dist].totalPsf += rentPsf;
+          byDist[dist].count++;
+          if (!byDist[dist].byQ[rentalQtr]) byDist[dist].byQ[rentalQtr] = { totalPsf: 0, count: 0 };
+          byDist[dist].byQ[rentalQtr].totalPsf += rentPsf;
+          byDist[dist].byQ[rentalQtr].count++;
+
+          if (!bySeg[seg]) bySeg[seg] = { totalRent: 0, totalPsf: 0, count: 0 };
+          bySeg[seg].totalRent += monthlyRent;
+          bySeg[seg].totalPsf += rentPsf;
+          bySeg[seg].count++;
+
+          if (!byQtr[rentalQtr]) byQtr[rentalQtr] = { totalRent: 0, totalMed: [], count: 0 };
+          byQtr[rentalQtr].totalRent += monthlyRent;
+          byQtr[rentalQtr].totalMed.push(monthlyRent);
+          byQtr[rentalQtr].count++;
+
+          // Store ALL rental records for full browsing/search
+          // d = YYYY-MM from leaseDate (or mid-quarter fallback), matches sales store format
+          // a = numeric midpoint (for calculations), af = formatted sqft range (for display)
+          const fmtRange = sqftStr ? sqftStr.split('-').map(v => parseInt(v).toLocaleString()).join(' - ') : `${areaSqf.toLocaleString()}`;
+          rentalStore.push({
+            d: rentalDate, p: name, st: p.street || '', di: dist, sg: seg,
+            a: areaSqf, af: fmtRange, br: bedrooms, rn: monthlyRent, rp: rentPsf,
+            nc: numContracts, lc: r.leaseDate || '',
+          });
+        }
+      }
+    } catch (err) {
+      console.warn(`  ⚠️ Rental ${refPeriod}: ${err.message}`);
+    }
+  }
+
+  if (totalCount === 0) {
+    console.log('⚠️ No rental data fetched');
+    return null;
+  }
+
+  // Compute averages
+  for (const p of Object.values(byProject)) { p.avgRent = Math.round(p.totalRent / p.count); p.avgRentPsf = +(p.totalPsf / p.count).toFixed(2); }
+  for (const d of Object.values(byDist)) {
+    d.avgRent = Math.round(d.totalRent / d.count);
+    d.avgRentPsf = +(d.totalPsf / d.count).toFixed(2);
+    for (const q of Object.values(d.byQ)) { q.avgRentPsf = +(q.totalPsf / q.count).toFixed(2); }
+  }
+  for (const s of Object.values(bySeg)) { s.avgRent = Math.round(s.totalRent / s.count); s.avgRentPsf = +(s.totalPsf / s.count).toFixed(2); }
+  for (const q of Object.values(byQtr)) { q.avgRent = Math.round(q.totalRent / q.count); q.medRent = med(q.totalMed); delete q.totalMed; }
+
+  console.log(`✅ Rental: ${totalCount} records from ${Object.keys(byProject).length} projects`);
+  return {
+    byProject, byDist, bySeg, byQtr,
+    overallAvgRent: Math.round(totalRent / totalCount),
+    overallAvgRentPsf: +(totalRentPsf / totalCount).toFixed(2),
+    overallMedRent: med(allRents),
+  };
+}
+
+// ═══ BUILD ═══
+
+export async function buildDashboardData(force = false) {
+  if (!force && dashboardCache && cacheTime && (Date.now() - cacheTime < CACHE_TTL)) {
+    return dashboardCache;
+  }
+  console.log('🔄 Building dashboard from URA API...');
+  salesStore = [];   // Clear previous
+  rentalStore = [];
+  const agg = new Agg();
+
+  for (let batch = 1; batch <= 4; batch++) {
+    try {
+      console.log(`📥 Batch ${batch}...`);
+      const projects = await fetchBatch('PMI_Resi_Transaction', batch);
+      console.log(`✅ Batch ${batch}: ${projects.length} projects`);
+      for (const p of projects) agg.add(p, batch);
+    } catch (err) { console.error(`❌ Batch ${batch}:`, err.message); }
+  }
+
+  // FIX #2: Fetch real rental data
+  let rentalData = null;
+  try {
+    rentalData = await fetchRentalData();
+  } catch (err) {
+    console.error('❌ Rental fetch failed:', err.message);
+  }
+
+  // Sort transaction stores by date (newest first)
+  salesStore.sort((a, b) => b.d.localeCompare(a.d));
+  rentalStore.sort((a, b) => b.d.localeCompare(a.d));
+
+  // Build bedroom inference model from rental area↔bedroom data
+  if (rentalStore.length > 0) buildBedroomModel();
+
+  console.log(`📊 ${agg.total} sales, ${salesStore.length} stored, ${rentalStore.length} rental records`);
+  dashboardCache = agg.build(rentalData);
+  dashboardCache.lastUpdated = new Date().toISOString();
+  cacheTime = Date.now();
+  projectCache.clear();
+  console.log(`✅ Dashboard ready (${Math.round(JSON.stringify(dashboardCache).length / 1024)}KB, rental: ${dashboardCache.hasRealRental ? 'REAL' : 'ESTIMATED'})`);
+
+  // Persist to disk for instant restart + write static snapshot for instant frontend load
+  try {
+    saveToDisk(dashboardCache, salesStore, rentalStore, projectBatchMap);
+    writeSnapshot(dashboardCache);
+  } catch (err) {
+    console.error('💾 Disk save failed:', err.message);
+  }
+
+  return dashboardCache;
+}
+
+/**
+ * Initialize dashboard — loads from disk cache first for instant startup,
+ * then refreshes from URA API in background if cache is stale.
+ * Returns true if data is ready to serve immediately.
+ */
+export async function initDashboard() {
+  // 1. Try loading from disk cache
+  const cached = loadFromDisk();
+  if (cached) {
+    dashboardCache = cached.dashboard;
+    salesStore = cached.salesStore;
+    rentalStore = cached.rentalStore;
+    projectBatchMap = cached.batchMap;
+    cacheTime = Date.now();
+
+    // Rebuild projYearData from salesStore + projIndex (not persisted to disk)
+    _rebuildProjYearData();
+
+    // Rebuild bedroom inference model from rental data
+    if (rentalStore.length > 0) buildBedroomModel();
+
+    console.log(`🚀 Serving from disk cache (${cached.ageMinutes}min old, ${cached.salesStore.length} sales, ${cached.rentalStore.length} rentals)`);
+    console.log(`   Refresh manually via POST /api/refresh when you want fresh URA data.`);
+
+    // Ensure static snapshot exists for instant frontend loading
+    writeSnapshot(dashboardCache);
+
+    return true;
+  }
+
+  // 2. No cache — must do full fetch (first-ever run)
+  console.log('❄️ First run — no disk cache, fetching from URA API...');
+  await buildDashboardData(true);
+  return true;
+}
+
+/**
+ * Rebuild projYearData from salesStore + projIndex.
+ * Called after disk cache load since projYearData is in-memory only (not persisted).
+ */
+function _rebuildProjYearData() {
+  const idx = dashboardCache?.projIndex;
+  if (!idx || !salesStore.length) { projYearData = {}; return; }
+
+  // Aggregate yearPsf from salesStore
+  const projAgg = {};
+  for (const r of salesStore) {
+    const year = r.d.slice(0, 4);
+    if (!projAgg[r.p]) projAgg[r.p] = {};
+    if (!projAgg[r.p][year]) projAgg[r.p][year] = { s: 0, n: 0 };
+    projAgg[r.p][year].s += r.ps;
+    projAgg[r.p][year].n++;
+  }
+
+  // Recompute real yield from rentalStore (don't trust cached yield)
+  const rentalByProj = {};
+  for (const r of rentalStore) {
+    if (!rentalByProj[r.p]) rentalByProj[r.p] = { totalPsf: 0, n: 0 };
+    rentalByProj[r.p].totalPsf += r.rp;
+    rentalByProj[r.p].n++;
+  }
+
+  projYearData = {};
+  for (const [name, meta] of Object.entries(idx)) {
+    const yearPsf = {};
+    if (projAgg[name]) {
+      for (const [y, yData] of Object.entries(projAgg[name])) {
+        yearPsf[y] = avg(yData.s, yData.n);
+      }
+    }
+    // Recompute yield from real rental data only
+    const rp = rentalByProj[name];
+    const yld = rp && meta.psf > 0 ? +((rp.totalPsf / rp.n * 12 / meta.psf) * 100).toFixed(2) : 0;
+    const rent = rp ? Math.round(rp.totalPsf / rp.n) : 0; // avg rent PSF for nearby comparisons
+    projYearData[name] = {
+      street: meta.street || '', dist: meta.dist, seg: meta.seg,
+      n: meta.n, type: meta.type, psf: meta.psf, yield: yld, yearPsf,
+      hasRealRental: !!rp, rent,
+    };
+  }
+
+  // Also fix projIndex yield and yearPsf to match (frontend reads this for search-added projects)
+  for (const [name, meta] of Object.entries(idx)) {
+    const rp = rentalByProj[name];
+    meta.yield = rp && meta.psf > 0 ? +((rp.totalPsf / rp.n * 12 / meta.psf) * 100).toFixed(2) : 0;
+    meta.hasRealRental = !!rp;
+    meta.yearPsf = projYearData[name]?.yearPsf || {};
+  }
+
+  console.log(`🔗 Rebuilt projYearData: ${Object.keys(projYearData).length} projects (${Object.keys(rentalByProj).length} with real rental)`);
+}
+
+/**
+ * Get disk + memory cache status for health endpoint
+ */
+export function getFullCacheInfo() {
+  return {
+    memory: getCacheInfo(),
+    disk: getCacheStatus(),
+  };
+}
+
+// ═══ PROJECT DETAIL ═══
+
+export async function getProjectData(projectName) {
+  if (!dashboardCache) await buildDashboardData();
+
+  // FIX #3: Check project cache first
+  if (projectCache.has(projectName)) {
+    return projectCache.get(projectName);
+  }
+
+  const pool = dashboardCache?.cmpPool?.find(p => p.name === projectName);
+  const idx = !pool ? dashboardCache?.projIndex?.[projectName] : null;
+  const meta = pool || (idx ? { dist: idx.dist, type: idx.type, segment: idx.seg, street: idx.street } : null);
+
+  // ── Fast path: build from in-memory salesStore (avoids slow URA API batch calls) ──
+  if (salesStore.length > 0) {
+    const projSales = salesStore.filter(r => r.p === projectName);
+    if (projSales.length > 0) {
+      // Reconstruct a URA-compatible project object from salesStore records
+      const first = projSales[0];
+      const fakeProject = {
+        project: projectName,
+        street: first.st || meta?.street || '',
+        marketSegment: first.sg || meta?.segment || 'RCR',
+        propertyType: first.pt || meta?.type || '',
+        transaction: projSales.map(r => ({
+          contractDate: (() => {
+            // Convert 'YYYY-MM' back to 'MMYY' format for parseDate
+            const [y, m] = r.d.split('-');
+            return `${m}${y.slice(2)}`;
+          })(),
+          area: String((r.a / 10.7639).toFixed(3)), // Convert sqft back to sqm for parser
+          price: String(r.pr),
+          floorRange: r.fl || '-',
+          district: r.di ? r.di.replace('D', '') : '',
+          typeOfSale: r.tp === 'New Sale' ? '1' : r.tp === 'Sub Sale' ? '2' : '3',
+          tenure: r.tn || '',
+        })),
+      };
+      const result = buildProjectResult(fakeProject, meta);
+      cacheProject(projectName, result);
+      return result;
+    }
+  }
+
+  // ── Slow path: fetch from URA API (only if salesStore doesn't have the project) ──
+  const batch = projectBatchMap[projectName];
+
+  if (!batch) {
+    for (let b = 1; b <= 4; b++) {
+      try {
+        const projects = await fetchBatch('PMI_Resi_Transaction', b);
+        const p = projects.find(pr => pr.project === projectName);
+        if (p) { projectBatchMap[projectName] = b; const result = buildProjectResult(p, meta); cacheProject(projectName, result); return result; }
+      } catch (err) { continue; }
+    }
+    return null;
+  }
+
+  try {
+    const projects = await fetchBatch('PMI_Resi_Transaction', batch);
+    const p = projects.find(pr => pr.project === projectName);
+    if (!p) return null;
+    const result = buildProjectResult(p, meta);
+    cacheProject(projectName, result); // FIX #3
+    return result;
+  } catch (err) { console.error('Project error:', err.message); return null; }
+}
+
+// FIX #3: LRU-like cache for project data
+function cacheProject(name, data) {
+  if (projectCache.size >= PROJECT_CACHE_MAX) {
+    const oldest = projectCache.keys().next().value;
+    projectCache.delete(oldest);
+  }
+  projectCache.set(name, data);
+}
+
+function buildProjectResult(p, pool) {
+  const projectName = p.project;
+  const seg = (p.marketSegment || 'RCR').toUpperCase();
+  const yRate = getYield(seg);
+
+  // Extract district from first transaction if pool doesn't have it
+  const rawDist = p.transaction?.[0]?.district ? `D${parseInt(p.transaction[0].district)}` : '';
+  const dist = pool?.dist || rawDist;
+
+  // A1 FIX: Fetch real rental records FIRST (before any code that references them)
+  const realProjRentals = rentalStore.filter(r => r.p === projectName);
+
+  const txs = (p.transaction || []).map(tx => {
+    const d = parseDate(tx.contractDate); if (!d) return null;
+    const area = Math.round((parseFloat(tx.area) || 0) * 10.7639);
+    const price = parseFloat(tx.price) || 0;
+    if (area <= 0 || price <= 0) return null;
+    const psf = Math.round(price / area);
+    const fl = parseFloor(tx.floorRange);
+    const beds = inferBedrooms(projectName, area);
+    let tenure = 'Leasehold';
+    if (tx.tenure) { const t = tx.tenure.toLowerCase(); if (t.includes('freehold')) tenure = 'Freehold'; else if (t.includes('999')) tenure = '999-yr'; }
+    return { year: String(d.year), quarter: d.quarter, month: d.month, date: `${d.year}-${String(d.month).padStart(2,'0')}`, area, price, psf, floorRange: fl.band, floorMid: fl.mid, saleType: tx.typeOfSale === '1' ? 'New Sale' : tx.typeOfSale === '2' ? 'Sub Sale' : 'Resale', size: area, floor: fl.band, beds, tenure };
+  }).filter(Boolean);
+
+  // A2 FIX: parseInt year for numeric sort (year is String like '2024')
+  txs.sort((a, b) => (parseInt(b.year) * 100 + b.month) - (parseInt(a.year) * 100 + a.month));
+
+  const years = [...new Set(txs.map(t => t.year))].sort();
+  const quarters = [...new Set(txs.map(t => t.quarter))].sort();
+  const avgA = txs.length > 0 ? Math.round(txs.reduce((s,t) => s + t.area, 0) / txs.length) : 0;
+
+  // Current PSF: prefer latest quarter, expand if thin (projects can be sparse)
+  const latestYear = years[years.length - 1];
+  const projQtrs = quarters.slice(); // already sorted
+  let psfSource = null;
+  let psfPeriod = '';
+  // Try latest Q → last 2Q → last 4Q → latest year → all-time (need ≥ 3 tx)
+  for (const window of [1, 2, 4]) {
+    const wQtrs = projQtrs.slice(-window);
+    const wSet = new Set(wQtrs);
+    const wTx = txs.filter(t => wSet.has(t.quarter));
+    if (wTx.length >= 3) {
+      psfSource = wTx;
+      psfPeriod = wQtrs.length === 1 ? wQtrs[0] : `${wQtrs[0]}–${wQtrs[wQtrs.length - 1]}`;
+      break;
+    }
+  }
+  if (!psfSource) {
+    const latYearTx = txs.filter(t => t.year === latestYear);
+    if (latYearTx.length > 0) { psfSource = latYearTx; psfPeriod = latestYear; }
+    else { psfSource = txs; psfPeriod = 'all'; }
+  }
+  const avgP = psfSource.length > 0 ? Math.round(psfSource.reduce((s,t) => s + t.psf, 0) / psfSource.length) : 0;
+  const rentPsf = +(avgP * yRate / 12).toFixed(2);
+
+  // Floor premium: use latest quarter window for current market accuracy
+  // Fall back to all-time only if < 3 total floor transactions in window
+  const now = new Date();
+  const m12d = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+  const m12 = `${m12d.getFullYear()}-${String(m12d.getMonth() + 1).padStart(2, '0')}`;
+  const recentTx = txs.filter(t => t.date >= m12);
+
+  const bands = ['01-05','06-10','11-15','16-20','21-25','26-30','31-35','36-40','41-45','46-50'];
+
+  // Floor premium: use LAST 12 MONTHS for current market accuracy
+  // Fall back to all-time only if < 3 total floor transactions in 12 months
+  const floorSource = recentTx.filter(t => t.floorMid > 0).length >= 3 ? recentTx : txs;
+  const floorPeriod = floorSource === recentTx ? '12M' : 'all';
+
+  const loFloor = floorSource.filter(t => t.floorMid > 0 && t.floorMid <= 5);
+  const thinThreshold = 3;
+  // Use low-floor avg as baseline if ≥3 transactions; otherwise fall back to project-wide avg
+  const loFloorAvg = loFloor.length >= thinThreshold ? Math.round(loFloor.reduce((s,t) => s + t.psf, 0) / loFloor.length) : null;
+  const bpsf = loFloorAvg || avgP;
+  const baselineSource = loFloorAvg ? 'low_floor' : 'project_avg';
+  const thinBands = [];
+
+  const projFloor = bands.map(r => {
+    const [lo, hi] = r.split('-').map(Number);
+    const ft = floorSource.filter(t => t.floorMid >= lo && t.floorMid <= hi);
+    if (!ft.length) return null;
+    const fp = Math.round(ft.reduce((s,t) => s + t.psf, 0) / ft.length);
+    const count = ft.length;
+    if (count < thinThreshold) thinBands.push(r);
+    return { range: r, premium: bpsf > 0 ? +((fp / bpsf - 1) * 100).toFixed(1) : 0, psf: fp, count, thin: count < thinThreshold };
+  }).filter(Boolean);
+
+  const byQ = {};
+  txs.forEach(t => { if (!byQ[t.quarter]) byQ[t.quarter] = []; byQ[t.quarter].push(t.psf); });
+  const projPsfTrend = quarters.slice(-8).map(q => {
+    const v = byQ[q] || [];
+    return { q, avg: v.length > 0 ? Math.round(v.reduce((s,x) => s + x, 0) / v.length) : 0, med: med(v), vol: v.length };
+  });
+  // Real rental trend: aggregate from rentalStore for this project
+  let projRentTrend;
+  if (realProjRentals.length > 0) {
+    const byRQ = {};
+    realProjRentals.forEach(r => {
+      // Convert YYYY-MM to quarter key for trend charts
+      const rY = r.d.slice(0, 4);
+      const rM = parseInt(r.d.slice(5, 7)) || 1;
+      const rQ = `${rY.slice(2)}q${Math.ceil(rM / 3)}`;
+      if (!byRQ[rQ]) byRQ[rQ] = { rents: [], total: 0, n: 0 };
+      byRQ[rQ].rents.push(r.rn); byRQ[rQ].total += r.rn; byRQ[rQ].n++;
+    });
+    const rqKeys = Object.keys(byRQ).sort();
+    projRentTrend = rqKeys.map(q => ({
+      q: q.replace('q', 'Q'), avg: Math.round(byRQ[q].total / byRQ[q].n), med: med(byRQ[q].rents),
+    }));
+  } else {
+    // No real rental data — return empty (no fake estimates)
+    projRentTrend = [];
+  }
+
+  const hmYears = years.slice(-7);
+  const hmFloors = projFloor.map(f => f.range);
+  const hmMatrix = {};
+  hmFloors.forEach(f => {
+    const [lo, hi] = f.split('-').map(Number);
+    hmYears.forEach(y => {
+      const c = txs.filter(t => t.floorMid >= lo && t.floorMid <= hi && t.year === y);
+      if (c.length > 0) hmMatrix[`${f}-${y}`] = { psf: Math.round(c.reduce((s,t) => s + t.psf, 0) / c.length), vol: c.length, price: Math.round(c.reduce((s,t) => s + t.price, 0) / c.length) };
+    });
+  });
+
+  const allSz = [...new Set(txs.map(t => t.area))].sort((a,b) => a - b);
+  // Compute standard sizes from actual data percentiles instead of hardcoded
+  const std = allSz.length >= 7
+    ? [0.05, 0.15, 0.3, 0.5, 0.7, 0.85, 0.95].map(p => allSz[Math.floor(p * (allSz.length - 1))])
+    : allSz.length > 0 ? allSz : [];
+  const projSizes = [...new Set(std)].sort((a,b) => a - b);
+  const distAvg = dashboardCache?.sDistBar?.find(d => d.d === dist)?.v || avgP;
+
+  const projTx = txs.map(t => ({
+    date: `${t.year}-${String(t.month).padStart(2,'0')}`,
+    address: t.floorRange || '-',
+    area: t.area, price: t.price, psf: t.psf, type: t.saleType, beds: t.beds, tenure: t.tenure || '', floorMid: t.floorMid || 0,
+  }));
+  const projRentTx = realProjRentals.length > 0
+    ? [...realProjRentals].sort((a, b) => b.d.localeCompare(a.d)).map(r => ({
+        date: r.d, address: '-',
+        area: r.af, areaSqf: r.a, bedrooms: r.br || '', rent: r.rn, psf: r.rp,
+        leaseDate: r.lc || '', contracts: r.nc || 1,
+      }))
+    : [];
+
+  // Use real rental data for this project if available — no estimates
+  const realAvgRent = realProjRentals.length > 0
+    ? Math.round(realProjRentals.reduce((s,r) => s + r.rn, 0) / realProjRentals.length)
+    : 0;
+  const realRentPsf = realProjRentals.length > 0
+    ? +(realProjRentals.reduce((s,r) => s + r.rp, 0) / realProjRentals.length).toFixed(2)
+    : 0;
+  const realYield = realProjRentals.length > 0 && avgP > 0
+    ? +((realRentPsf * 12 / avgP) * 100).toFixed(2)
+    : 0;
+  // Rental period: earliest and latest quarter from real rental records
+  const rentalQuarters = realProjRentals.length > 0
+    ? [...new Set(realProjRentals.map(r => r.d))].sort()
+    : [];
+  const rentalPeriod = rentalQuarters.length > 0
+    ? (rentalQuarters.length === 1 ? rentalQuarters[0] : `${rentalQuarters[0]}–${rentalQuarters[rentalQuarters.length - 1]}`)
+    : '';
+
+  // ─── Nearby projects: same street → same district (from URA data, not hardcoded) ───
+  const projStreet = p.street || '';
+  const nearbyProjects = (() => {
+    if (!Object.keys(projYearData).length) return [];
+
+    // Pre-build rental and area lookup maps (avoids O(n*m) filter inside loop)
+    const rentalByProj = {};
+    for (const r of rentalStore) {
+      if (!rentalByProj[r.p]) rentalByProj[r.p] = { total: 0, n: 0 };
+      rentalByProj[r.p].total += r.rn;
+      rentalByProj[r.p].n++;
+    }
+    const areaByProj = {};
+    for (const r of salesStore) {
+      if (!areaByProj[r.p]) areaByProj[r.p] = { total: 0, n: 0 };
+      if (areaByProj[r.p].n < 20) { areaByProj[r.p].total += r.a; areaByProj[r.p].n++; }
+    }
+
+    const sameStreet = [];
+    const sameDist = [];
+
+    // Pre-build per-project per-bedroom per-year PSF from salesStore
+    const projBedYearPsf = {};
+    for (const r of salesStore) {
+      const beds = inferBedrooms(r.p, r.a);
+      if (!beds) continue;
+      const year = r.d.slice(0, 4);
+      // Split "3/4" into ["3","4"] so tx counts towards both
+      const bedTypes = beds.split('/');
+      for (const bt of bedTypes) {
+        if (!projBedYearPsf[r.p]) projBedYearPsf[r.p] = {};
+        if (!projBedYearPsf[r.p][bt]) projBedYearPsf[r.p][bt] = {};
+        if (!projBedYearPsf[r.p][bt][year]) projBedYearPsf[r.p][bt][year] = { s: 0, n: 0 };
+        projBedYearPsf[r.p][bt][year].s += r.ps;
+        projBedYearPsf[r.p][bt][year].n++;
+      }
+    }
+
+    for (const [name, pd] of Object.entries(projYearData)) {
+      if (name === projectName) continue;
+      let rent = 0;
+      const rp = rentalByProj[name];
+      if (rp) {
+        rent = Math.round(rp.total / rp.n / 100) * 100;
+      }
+      // Per-bedroom yearPsf for this project
+      const bedYearPsf = {};
+      if (projBedYearPsf[name]) {
+        for (const [beds, byYear] of Object.entries(projBedYearPsf[name])) {
+          bedYearPsf[beds] = {};
+          for (const [y, yData] of Object.entries(byYear)) {
+            bedYearPsf[beds][y] = avg(yData.s, yData.n);
+          }
+        }
+      }
+      const entry = { name, ...pd, rent, bedYearPsf, rel: projStreet && pd.street === projStreet ? 'street' : 'district' };
+      if (projStreet && pd.street === projStreet) {
+        sameStreet.push(entry);
+      } else if (pd.dist === dist) {
+        sameDist.push(entry);
+      }
+    }
+    // Sort each group by volume (most transactions first)
+    sameStreet.sort((a, b) => b.n - a.n);
+    sameDist.sort((a, b) => b.n - a.n);
+    // All same-street + fill up to 15 with same-district
+    const result = [...sameStreet, ...sameDist.slice(0, Math.max(0, 15 - sameStreet.length))];
+    return result.slice(0, 15);
+  })();
+
+  return {
+    projInfo: {
+      name: projectName, district: `${dist} (${p.street || ''})`.trim(),
+      segment: seg, tenure: p.transaction?.[0]?.tenure || '', type: p.propertyType || pool?.type || '', top: '',
+      units: txs.length, avgPsf: avgP, psfPeriod, medPsf: med(psfSource.map(t => t.psf)),
+      totalTx: txs.length, avgRent: realAvgRent, rentPsf: realRentPsf,
+      yield: realYield, distAvg,
+      hasRealRental: realProjRentals.length > 0,
+      rentalPeriod, rentalCount: realProjRentals.length,
+    },
+    projPsfTrend, projRentTrend, projFloor, floorPeriod, thinBands, baselineSource,
+    projScatter: txs.slice(0, 80).map(t => ({ area: t.area, psf: t.psf, floor: t.floorMid, price: t.price, beds: t.beds })),
+    projTx, projRentTx, hmYears, hmFloors, hmMatrix,
+    rawTx: txs, projSizes, sizeOptions: allSz, floorRanges: hmFloors, txs,
+    nearbyProjects,
+    // Project's own yearPsf for comparison heatmap
+    yearPsf: (() => { const yp = {}; years.forEach(y => { const yt = txs.filter(t => t.year === y); if (yt.length) yp[y] = Math.round(yt.reduce((s, t) => s + t.psf, 0) / yt.length); }); return yp; })(),
+    // Per-bedroom yearPsf for self project (for bedroom filter in Compare)
+    bedYearPsf: (() => {
+      const byp = {};
+      for (const t of txs) {
+        if (!t.beds) continue;
+        // Split "3/4" into ["3","4"] so tx counts towards both
+        const bedTypes = t.beds.split('/');
+        for (const bt of bedTypes) {
+          if (!byp[bt]) byp[bt] = {};
+          if (!byp[bt][t.year]) byp[bt][t.year] = { s: 0, n: 0 };
+          byp[bt][t.year].s += t.psf;
+          byp[bt][t.year].n++;
+        }
+      }
+      const result = {};
+      for (const [beds, byYear] of Object.entries(byp)) {
+        result[beds] = {};
+        for (const [y, yData] of Object.entries(byYear)) {
+          result[beds][y] = Math.round(yData.s / yData.n);
+        }
+      }
+      return result;
+    })(),
+    // Rental filter options for this project
+    rentalBedrooms: [...new Set(realProjRentals.map(r => r.br).filter(b => b && b !== '' && /^\d+$/.test(b)))].sort((a, b) => parseInt(a) - parseInt(b)),
+    // Inferred bedroom options from area→bedroom model (for sale tx filtering)
+    bedOptions: [...new Set(txs.map(t => t.beds).filter(b => b && b !== ''))].sort((a, b) => parseInt(a) - parseInt(b)),
+  };
+}
+
+export function getTokenInfo() {
+  return {
+    hasToken: !!token.value, fetchedAt: token.fetchedAt?.toISOString(),
+    expiresAt: token.expiresAt?.toISOString(),
+    hoursRemaining: token.expiresAt ? +((token.expiresAt - Date.now()) / 3600000).toFixed(1) : 0,
+    isValid: token.value && Date.now() < token.expiresAt,
+  };
+}
+
+export function getCacheInfo() {
+  return {
+    hasDashboard: !!dashboardCache, hasRealRental: dashboardCache?.hasRealRental || false,
+    cacheAge: cacheTime ? Math.round((Date.now() - cacheTime) / 60000) + 'min' : null,
+    totalTx: dashboardCache?.totalTx || 0,
+    salesRecords: salesStore.length,
+    rentalRecords: rentalStore.length,
+    projectCacheSize: projectCache.size,
+  };
+}
+
+// ═══ PAGINATED SEARCH ═══
+
+/**
+ * Search sales transactions
+ * @param {Object} opts - { q, district, segment, type, page, limit, sort }
+ */
+export async function searchSales(opts = {}) {
+  if (!dashboardCache) await buildDashboardData();
+  const { q: rawQ = '', district = '', segment = '', type = '', tenure = '',
+          page = 1, limit = 50, sort = 'date_desc' } = opts;
+  const q = rawQ.slice(0, 200); // Cap query length
+
+  let results = salesStore;
+
+  // Filter
+  if (q) {
+    const ql = q.toLowerCase();
+    results = results.filter(r => r.p.toLowerCase().includes(ql) || r.st.toLowerCase().includes(ql));
+  }
+  if (district) results = results.filter(r => r.di === district);
+  if (segment) results = results.filter(r => r.sg === segment);
+  if (type) results = results.filter(r => r.tp === type);
+  if (tenure) results = results.filter(r => r.tn === tenure);
+
+  // Sort
+  if (sort === 'price_desc') results = [...results].sort((a, b) => b.pr - a.pr);
+  else if (sort === 'price_asc') results = [...results].sort((a, b) => a.pr - b.pr);
+  else if (sort === 'psf_desc') results = [...results].sort((a, b) => b.ps - a.ps);
+  else if (sort === 'psf_asc') results = [...results].sort((a, b) => a.ps - b.ps);
+  else if (sort === 'area_desc') results = [...results].sort((a, b) => b.a - a.a);
+  else if (sort === 'area_asc') results = [...results].sort((a, b) => a.a - b.a);
+  else if (sort === 'date_asc') results = [...results].sort((a, b) => a.d.localeCompare(b.d));
+  else results = [...results].sort((a, b) => b.d.localeCompare(a.d)); // date_desc default
+
+  const total = results.length;
+  const pages = Math.ceil(total / limit);
+  const start = (page - 1) * limit;
+  const slice = results.slice(start, start + limit);
+
+  return {
+    total, page, pages, limit,
+    results: slice.map(r => ({
+      date: r.d, project: r.p, street: r.st, district: r.di, segment: r.sg,
+      area: r.a, price: r.pr, psf: r.ps, floor: r.fl, type: r.tp,
+      propertyType: r.pt, tenure: r.tn,
+    })),
+  };
+}
+
+/**
+ * Search rental transactions
+ * @param {Object} opts - { q, district, segment, page, limit, sort }
+ */
+export async function searchRental(opts = {}) {
+  if (!dashboardCache) await buildDashboardData();
+  const { q: rawQ = '', district = '', segment = '', bedrooms = '', areaSqft = '',
+          page = 1, limit = 50, sort = 'date_desc' } = opts;
+  const q = rawQ.slice(0, 200); // Cap query length
+
+  let results = rentalStore;
+
+  if (q) {
+    const ql = q.toLowerCase();
+    results = results.filter(r => r.p.toLowerCase().includes(ql) || r.st.toLowerCase().includes(ql));
+  }
+  if (district) results = results.filter(r => r.di === district);
+  if (segment) results = results.filter(r => r.sg === segment);
+  if (bedrooms) results = results.filter(r => r.br === bedrooms);
+  if (areaSqft) {
+    // areaSqft filter is a range key like "500-1000"
+    const [lo, hi] = areaSqft.split('-').map(Number);
+    if (lo >= 0 && hi > 0) results = results.filter(r => r.a >= lo && r.a < hi);
+  }
+
+  if (sort === 'rent_desc') results = [...results].sort((a, b) => b.rn - a.rn);
+  else if (sort === 'rent_asc') results = [...results].sort((a, b) => a.rn - b.rn);
+  else if (sort === 'psf_desc') results = [...results].sort((a, b) => b.rp - a.rp);
+  else if (sort === 'psf_asc') results = [...results].sort((a, b) => a.rp - b.rp);
+  else if (sort === 'area_desc') results = [...results].sort((a, b) => b.a - a.a);
+  else if (sort === 'area_asc') results = [...results].sort((a, b) => a.a - b.a);
+  else if (sort === 'date_asc') results = [...results].sort((a, b) => a.d.localeCompare(b.d));
+  else results = [...results].sort((a, b) => b.d.localeCompare(a.d)); // date_desc default
+
+  const total = results.length;
+  const pages = Math.ceil(total / limit);
+  const start = (page - 1) * limit;
+  const slice = results.slice(start, start + limit);
+
+  return {
+    total, page, pages, limit,
+    results: slice.map(r => ({
+      period: r.d, project: r.p, street: r.st, district: r.di, segment: r.sg,
+      area: r.af, bedrooms: r.br || '', rent: r.rn, rentPsf: r.rp,
+      contracts: r.nc, leaseDate: r.lc,
+    })),
+  };
+}
+
+/**
+ * Get available filter options
+ */
+// ═══ FILTERED DASHBOARD — re-aggregates from salesStore/rentalStore with user filters ═══
+
+/**
+ * Build a filtered version of the dashboard data.
+ * Runs on in-memory salesStore/rentalStore — no URA API calls needed.
+ * Returns same shape as the unfiltered dashboard so frontend can swap seamlessly.
+ *
+ * @param {{ district?: string, year?: string, segment?: string, propertyType?: string, tenure?: string }} filters
+ */
+export function buildFilteredDashboard(filters = {}) {
+  if (!dashboardCache) return null; // Not initialised yet
+
+  // ── Filter sales ──
+  let sales = salesStore;
+  if (filters.district) sales = sales.filter(r => r.di === filters.district);
+  if (filters.year)     sales = sales.filter(r => r.d.startsWith(filters.year));
+  if (filters.segment)  sales = sales.filter(r => r.sg === filters.segment);
+  if (filters.propertyType) sales = sales.filter(r => r.pt === filters.propertyType);
+  if (filters.tenure)   sales = sales.filter(r => r.tn === filters.tenure);
+
+  // ── Filter rentals ──
+  let rentals = rentalStore;
+  if (filters.district) rentals = rentals.filter(r => r.di === filters.district);
+  if (filters.year) {
+    rentals = rentals.filter(r => r.d.startsWith(filters.year));
+  }
+  if (filters.segment) rentals = rentals.filter(r => r.sg === filters.segment);
+
+  if (sales.length === 0) return null;
+
+  // ── Single-pass aggregation ──
+  const byYear = {}, byQtr = {}, bySeg = {}, byDist = {}, byType = {}, byTenure = {}, byProj = {};
+  let totalVol = 0;
+  const allPsf = [];
+  const psfSample = []; // Reservoir sample for histogram/scatter
+
+  for (const r of sales) {
+    const year = r.d.slice(0, 4);
+    const month = parseInt(r.d.slice(5, 7)) || 1;
+    const qtr = `${year.slice(2)}Q${Math.ceil(month / 3)}`;
+
+    totalVol += r.pr;
+
+    // Reservoir sample (max 2000)
+    if (psfSample.length < 2000) {
+      psfSample.push({ psf: r.ps, area: r.a, seg: r.sg, dist: r.di, year });
+    } else {
+      const j = Math.floor(Math.random() * (allPsf.length + 1));
+      if (j < 2000) psfSample[j] = { psf: r.ps, area: r.a, seg: r.sg, dist: r.di, year };
+    }
+    allPsf.push(r.ps);
+
+    // By year
+    if (!byYear[year]) byYear[year] = { s: 0, n: 0, v: 0, p: [] };
+    byYear[year].s += r.ps; byYear[year].n++; byYear[year].v += r.pr;
+    if (byYear[year].p.length < 500) byYear[year].p.push(r.ps);
+
+    // By quarter
+    if (!byQtr[qtr]) byQtr[qtr] = { s: 0, n: 0, v: 0, bySeg: {} };
+    byQtr[qtr].s += r.ps; byQtr[qtr].n++; byQtr[qtr].v += r.pr;
+    if (!byQtr[qtr].bySeg[r.sg]) byQtr[qtr].bySeg[r.sg] = { s: 0, n: 0 };
+    byQtr[qtr].bySeg[r.sg].s += r.ps; byQtr[qtr].bySeg[r.sg].n++;
+
+    // By segment (with per-year tracking)
+    if (!bySeg[r.sg]) bySeg[r.sg] = { s: 0, n: 0, byY: {} };
+    bySeg[r.sg].s += r.ps; bySeg[r.sg].n++;
+    if (!bySeg[r.sg].byY[year]) bySeg[r.sg].byY[year] = { s: 0, n: 0 };
+    bySeg[r.sg].byY[year].s += r.ps; bySeg[r.sg].byY[year].n++;
+
+    // By district
+    if (!byDist[r.di]) byDist[r.di] = { s: 0, n: 0, v: 0, byY: {}, byQ: {}, segCounts: {} };
+    const dd = byDist[r.di];
+    dd.s += r.ps; dd.n++; dd.v += r.pr;
+    dd.segCounts[r.sg] = (dd.segCounts[r.sg] || 0) + 1;
+    if (!dd.byY[year]) dd.byY[year] = { s: 0, n: 0 }; dd.byY[year].s += r.ps; dd.byY[year].n++;
+    if (!dd.byQ[qtr]) dd.byQ[qtr] = { s: 0, n: 0 }; dd.byQ[qtr].s += r.ps; dd.byQ[qtr].n++;
+
+    // By property type (with per-year tracking)
+    if (!byType[r.pt]) byType[r.pt] = { s: 0, n: 0, segCounts: {}, byY: {} };
+    byType[r.pt].s += r.ps; byType[r.pt].n++;
+    byType[r.pt].segCounts[r.sg] = (byType[r.pt].segCounts[r.sg] || 0) + 1;
+    if (!byType[r.pt].byY[year]) byType[r.pt].byY[year] = { s: 0, n: 0 };
+    byType[r.pt].byY[year].s += r.ps; byType[r.pt].byY[year].n++;
+
+    // By tenure (with per-year tracking)
+    if (!byTenure[r.tn]) byTenure[r.tn] = { s: 0, n: 0, byY: {} };
+    byTenure[r.tn].s += r.ps; byTenure[r.tn].n++;
+    if (!byTenure[r.tn].byY[year]) byTenure[r.tn].byY[year] = { s: 0, n: 0 };
+    byTenure[r.tn].byY[year].s += r.ps; byTenure[r.tn].byY[year].n++;
+
+    // By project
+    if (!byProj[r.p]) byProj[r.p] = { name: r.p, seg: r.sg, dist: r.di, pType: r.pt, s: 0, n: 0, areas: [], byY: {} };
+    const bp = byProj[r.p];
+    bp.s += r.ps; bp.n++;
+    if (bp.areas.length < 50) bp.areas.push(r.a);
+    if (!bp.byY[year]) bp.byY[year] = { s: 0, n: 0 }; bp.byY[year].s += r.ps; bp.byY[year].n++;
+  }
+
+  // ── Rental aggregation ──
+  const rByQtr = {}, rBySeg = {}, rByDist = {}, rByProj = {};
+  let rTotalRent = 0, rTotalPsf = 0, rCount = 0;
+  const allRents = [];
+
+  for (const r of rentals) {
+    rTotalRent += r.rn; rTotalPsf += r.rp; rCount++;
+    if (allRents.length < 5000) allRents.push(r.rn);
+
+    // Derive quarter from YYYY-MM date (e.g. "2026-01" → "26q1")
+    const rYear = r.d.slice(0, 4);
+    const rMonth = parseInt(r.d.slice(5, 7)) || 1;
+    const rQtr = `${rYear.slice(2)}q${Math.ceil(rMonth / 3)}`;
+
+    if (!rByQtr[rQtr]) rByQtr[rQtr] = { total: 0, rents: [], n: 0 };
+    rByQtr[rQtr].total += r.rn; rByQtr[rQtr].rents.push(r.rn); rByQtr[rQtr].n++;
+
+    if (!rBySeg[r.sg]) rBySeg[r.sg] = { total: 0, totalPsf: 0, n: 0 };
+    rBySeg[r.sg].total += r.rn; rBySeg[r.sg].totalPsf += r.rp; rBySeg[r.sg].n++;
+
+    if (!rByDist[r.di]) rByDist[r.di] = { total: 0, totalPsf: 0, n: 0, byQ: {} };
+    rByDist[r.di].total += r.rn; rByDist[r.di].totalPsf += r.rp; rByDist[r.di].n++;
+    if (!rByDist[r.di].byQ[rQtr]) rByDist[r.di].byQ[rQtr] = { totalPsf: 0, n: 0 };
+    rByDist[r.di].byQ[rQtr].totalPsf += r.rp; rByDist[r.di].byQ[rQtr].n++;
+
+    if (!rByProj[r.p]) rByProj[r.p] = { total: 0, totalPsf: 0, n: 0, seg: r.sg, dist: r.di };
+    rByProj[r.p].total += r.rn; rByProj[r.p].totalPsf += r.rp; rByProj[r.p].n++;
+  }
+
+  const hasRental = rCount > 0;
+
+  // ── Derived metrics ──
+  const totalTx = sales.length;
+  const years = Object.keys(byYear).sort();
+  const qtrs = Object.keys(byQtr).sort();
+  const latY = years[years.length - 1];
+  const prevY = years.length > 1 ? years[years.length - 2] : null;
+
+  // Helper: prefer latest year from a byY structure, fallback to all-time
+  const latOr = (obj) => {
+    const ly = obj.byY?.[latY];
+    return ly && ly.n >= 3 ? avg(ly.s, ly.n) : avg(obj.s, obj.n);
+  };
+
+  // ── Rolling window for stat cards — fallback chain: 3M → 6M → 12M → latest year ──
+  // Find latest date in filtered sales to anchor the window
+  const latestDate = sales.length > 0 ? sales.reduce((mx, r) => r.d > mx ? r.d : mx, sales[0].d) : '';
+  const ldParts = latestDate.split('-');
+  const ldY = parseInt(ldParts[0]) || 2026;
+  const ldM = parseInt(ldParts[1]) || 1;
+
+  let salesWindowF, psfPeriod;
+  for (const months of [3, 6, 12]) {
+    const mAgo = new Date(ldY, ldM - months, 1);
+    const cutoff = `${mAgo.getFullYear()}-${String(mAgo.getMonth() + 1).padStart(2, '0')}`;
+    const filtered = sales.filter(r => r.d >= cutoff);
+    if (filtered.length >= 20) {
+      salesWindowF = filtered;
+      psfPeriod = `${months}M`;
+      break;
+    }
+  }
+  if (!salesWindowF) {
+    salesWindowF = sales.filter(r => r.d.startsWith(latY));
+    if (salesWindowF.length === 0) salesWindowF = sales;
+    psfPeriod = latY;
+  }
+
+  const avgPsf = salesWindowF.length > 0
+    ? Math.round(salesWindowF.reduce((s, r) => s + r.ps, 0) / salesWindowF.length)
+    : (latY && byYear[latY] ? avg(byYear[latY].s, byYear[latY].n) : avg(allPsf.reduce((s, v) => s + v, 0), totalTx));
+  const medPsf = salesWindowF.length > 0
+    ? med(salesWindowF.map(r => r.ps))
+    : (latY && byYear[latY]?.p?.length > 0 ? med(byYear[latY].p) : med(allPsf));
+
+  // Latest-year samples (fallback to all if < 50)
+  const latSamples = psfSample.filter(s => s.year === latY);
+  const recentSamples = latSamples.length >= 50 ? latSamples : psfSample;
+  const avgArea = recentSamples.length > 0 ? Math.round(recentSamples.reduce((s, p) => s + p.area, 0) / recentSamples.length) : 0;
+
+  // YoY: compare full latest year vs full previous year (consistent with YoY trend chart)
+  const latYAvg = byYear[latY] ? avg(byYear[latY].s, byYear[latY].n) : avgPsf;
+  const prvAvg = prevY && byYear[prevY] ? avg(byYear[prevY].s, byYear[prevY].n) : 0;
+  const yoyPct = prvAvg > 0 ? +((latYAvg / prvAvg - 1) * 100).toFixed(1) : null;
+
+  // Use recent samples for current-market percentiles (matching Agg.build() logic)
+  const sortedPsf = recentSamples.map(s => s.psf).sort((a, b) => a - b);
+  const pctl = (p) => sortedPsf.length > 10 ? sortedPsf[Math.floor(sortedPsf.length * p)] : 0;
+
+  // Compute overall yield early — needed by rental trend fallback
+  const overallYield = (() => {
+    let tw = 0, tn = 0;
+    for (const [seg, { n }] of Object.entries(bySeg)) { tw += getYield(seg) * n; tn += n; }
+    return tn > 0 ? tw / tn : 0.028;
+  })();
+
+  // ── YoY trend ──
+  const yoy = years.map((y, i) => {
+    const b = byYear[y];
+    const a = avg(b.s, b.n);
+    const m = med(b.p);
+    const pa = i > 0 ? avg(byYear[years[i - 1]].s, byYear[years[i - 1]].n) : null;
+    return { year: y, avg: a, med: m, yoy: pa ? +((a / pa - 1) * 100).toFixed(1) : null };
+  });
+
+  // ── Rental trend ──
+  const rQtrs = Object.keys(rByQtr).sort();
+  const rTrend = (rQtrs.length > 0 ? rQtrs : qtrs).slice(-8).map((q, i, arr) => {
+    const qLabel = q.replace('q', 'Q'); // Normalize to uppercase for display consistency
+    const rq = rByQtr[q];
+    if (rq) {
+      const a = Math.round(rq.total / rq.n);
+      const m = med(rq.rents);
+      const pq = i > 0 ? rByQtr[arr[i - 1]] : null;
+      const pRent = pq ? Math.round(pq.total / pq.n) : null;
+      return { q: qLabel, avg: a, med: m, qoq: pRent ? +((a / pRent - 1) * 100).toFixed(1) : null, real: true };
+    }
+    // Estimated from sales
+    const qb = byQtr[q];
+    if (!qb) return { q: qLabel, avg: 0, med: 0, qoq: null, real: false };
+    const a = avg(qb.s, qb.n);
+    // H1 FIX: Use computed yield, not hardcoded 0.028
+    const rent = Math.round(a * overallYield / 12 * avgArea);
+    return { q: qLabel, avg: rent, med: rent, qoq: null, real: false };
+  });
+
+  // ── Segments ──
+  const sSeg = ['CCR', 'RCR', 'OCR'].map(s => ({
+    name: s, val: bySeg[s] ? latOr(bySeg[s]) : 0, count: bySeg[s]?.n || 0,
+  })).filter(s => s.count > 0);
+
+  const rSeg = sSeg.map(s => {
+    if (hasRental && rBySeg[s.name]) {
+      return { name: s.name, val: Math.round(rBySeg[s.name].total / rBySeg[s.name].n), count: rBySeg[s.name].n };
+    }
+    return { name: s.name, val: 0, count: 0 };
+  });
+
+  // ── Top projects ──
+  const sTop = Object.values(byProj).sort((a, b) => b.n - a.n).slice(0, 8).map(p => ({ n: p.name, c: p.n }));
+  const rTop = hasRental
+    ? Object.entries(rByProj).map(([name, rp]) => ({ n: name, c: rp.n })).sort((a, b) => b.c - a.c).slice(0, 8)
+    : sTop;
+
+  // ── District data ──
+  const dNames = Object.keys(byDist).sort(distSort);
+  const topDist = Object.entries(byDist).sort((a, b) => b[1].n - a[1].n).slice(0, 5).map(([d]) => d);
+
+  const sDistLine = qtrs.slice(-8).map(q => {
+    const row = { q };
+    topDist.forEach(d => { const dq = byDist[d]?.byQ[q]; row[d] = dq ? avg(dq.s, dq.n) : null; });
+    return row;
+  });
+  const rDistLine = sDistLine.map(row => {
+    const r = { q: row.q };
+    const rqKey = row.q.replace('Q', 'q');
+    topDist.forEach(d => {
+      if (hasRental && rByDist[d]?.byQ?.[rqKey]) {
+        r[d] = +(rByDist[d].byQ[rqKey].totalPsf / rByDist[d].byQ[rqKey].n).toFixed(2);
+      } else if (hasRental && rByDist[d]) {
+        r[d] = +(rByDist[d].totalPsf / rByDist[d].n).toFixed(2);
+      } else {
+        r[d] = null;
+      }
+    });
+    return r;
+  });
+
+  const sDistBar = dNames.map(d => {
+    const latD = byDist[d]?.byY?.[latY];
+    const v = latD ? avg(latD.s, latD.n) : avg(byDist[d].s, byDist[d].n);
+    return { d, v };
+  }).sort((a, b) => b.v - a.v).slice(0, 10);
+  const rDistBar = sDistBar.map(d => {
+    if (hasRental && rByDist[d.d]) return { d: d.d, v: +(rByDist[d.d].totalPsf / rByDist[d.d].n).toFixed(2) };
+    return { d: d.d, v: 0 };
+  });
+
+  // ── Property type & tenure ──
+  const sType = Object.entries(byType).map(([t, v]) => ({ t, v: latOr(v) })).sort((a, b) => b.v - a.v).slice(0, 5);
+  const rType = sType.map(t => {
+    if (hasRental) {
+      const projsOfType = Object.values(byProj).filter(p => p.pType === t.t);
+      const rents = projsOfType.map(p => rByProj[p.name]).filter(Boolean);
+      if (rents.length > 0) {
+        const totalRent = rents.reduce((s, r) => s + r.total, 0);
+        const totalCount = rents.reduce((s, r) => s + r.n, 0);
+        if (totalCount > 0) return { t: t.t, v: Math.round(totalRent / totalCount) };
+      }
+    }
+    return { t: t.t, v: 0 };
+  });
+  const sTenure = Object.entries(byTenure).map(([t, v]) => ({ t, v: latOr(v) })).sort((a, b) => b.v - a.v);
+
+  // ── Histograms — use recent samples for current market distribution ──
+  const psfVals = recentSamples.map(s => s.psf);
+  const pMin = Math.floor(Math.min(...psfVals) / 200) * 200;
+  const pMax = Math.ceil(Math.max(...psfVals) / 200) * 200;
+  const sHist = [];
+  for (let r = pMin; r < pMax; r += 200) sHist.push({ r: `$${r}`, c: psfVals.filter(p => p >= r && p < r + 200).length });
+
+  let rHist;
+  if (rentals.length > 0) {
+    const realRents = rentals.slice(0, 2000).map(r => r.rn);
+    const rMin = Math.floor(Math.min(...realRents) / 500) * 500;
+    const rMax = Math.ceil(Math.max(...realRents) / 500) * 500;
+    rHist = [];
+    for (let r = rMin; r < rMax; r += 500) rHist.push({ r: `$${r}`, c: realRents.filter(p => p >= r && p < r + 500).length });
+  } else {
+    rHist = [];
+  }
+
+  // ── Scatter — recent samples ──
+  const shuffled = [...recentSamples];
+  for (let i = shuffled.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]; }
+  const sScat = shuffled.slice(0, 200).map(s => ({ a: s.area, p: s.psf, s: s.seg }));
+  const rScat = rentals.length > 0
+    ? rentals.slice(0, 200).map(r => ({ a: r.a, p: r.rp, s: r.sg }))
+    : [];
+
+  // ── Volume ──
+  const sCum = qtrs.slice(-12).map(q => ({ d: q, v: byQtr[q]?.v || 0 }));
+  const rCum = qtrs.slice(-12).map(q => {
+    const rqKey = q.replace('Q', 'q');
+    return { d: q, v: rByQtr[rqKey]?.n || 0 };
+  });
+
+  // ── Investment: yield & CAGR ──
+  const ydAll = dNames.map(d => {
+    const b = byDist[d];
+    const latD = b.byY?.[latY];
+    const bp = latD ? avg(latD.s, latD.n) : avg(b.s, b.n); // Latest year > all-time
+    const dSeg = domSeg(b.segCounts);
+    let yld, rp;
+    if (hasRental && rByDist[d]) {
+      rp = +(rByDist[d].totalPsf / rByDist[d].n).toFixed(2);
+      yld = bp > 0 ? +((rp * 12 / bp) * 100).toFixed(2) : 0;
+    } else {
+      yld = 0;
+      rp = 0;
+    }
+    return { d, rp, bp, y: yld, seg: dSeg };
+  }).filter(d => d.bp > 0);
+  const yd = [...ydAll].filter(d => d.y > 0).sort((a, b) => b.y - a.y).slice(0, 8);
+
+  // Fixed 5-year CAGR window: consistent timeframe across all districts
+  const CAGR_WINDOW = 5;
+  const eY = years[years.length - 1];
+  const sY = String(parseInt(eY) - CAGR_WINDOW);
+  const cagrData = dNames.map(d => {
+    const b = byDist[d];
+    const sA = b.byY?.[sY] ? avg(b.byY[sY].s, b.byY[sY].n) : null;
+    const eA = b.byY?.[eY] ? avg(b.byY[eY].s, b.byY[eY].n) : null;
+    if (!sA || !eA) return null;
+    const lowConf = (b.byY[sY]?.n || 0) < 3 || (b.byY[eY]?.n || 0) < 3;
+    const cagr = +((Math.pow(eA / sA, 1 / CAGR_WINDOW) - 1) * 100).toFixed(1);
+    const yRec = ydAll.find(y => y.d === d);
+    const yld = yRec ? yRec.y : 0;
+    return { d, cagr, y: yld, seg: domSeg(b.segCounts), bp: eA, total: +(cagr + yld).toFixed(2), cagrYears: CAGR_WINDOW, lowConf };
+  }).filter(Boolean).sort((a, b) => b.total - a.total).slice(0, 8);
+
+  // District performance table: ALL districts with 5-year CAGR + absolute returns
+  const distPerf = dNames.map(d => {
+    const b = byDist[d];
+    const sA = b.byY?.[sY] ? avg(b.byY[sY].s, b.byY[sY].n) : null;
+    const eA = b.byY?.[eY] ? avg(b.byY[eY].s, b.byY[eY].n) : null;
+    if (!sA || !eA || sA <= 0) return null;
+    const sTx = b.byY[sY]?.n || 0;
+    const eTx = b.byY[eY]?.n || 0;
+    const lowConf = sTx < 3 || eTx < 3;
+    const absDiff = Math.round(eA - sA);
+    const pctChg = +((eA / sA - 1) * 100).toFixed(1);
+    const cagr = +((Math.pow(eA / sA, 1 / CAGR_WINDOW) - 1) * 100).toFixed(1);
+    const yRec = ydAll.find(y => y.d === d);
+    const yld = yRec ? yRec.y : 0;
+    const totalReturn = +(cagr + yld).toFixed(2);
+    return {
+      d, seg: domSeg(b.segCounts),
+      startPsf: Math.round(sA), endPsf: Math.round(eA),
+      absDiff, pctChg, cagr, yield: yld, totalReturn,
+      startYear: sY, endYear: eY, window: CAGR_WINDOW,
+      txStart: sTx, txEnd: eTx, txTotal: b.n, lowConf,
+    };
+  }).filter(Boolean).sort((a, b) => b.cagr - a.cagr);
+
+  // Project performance table: filtered projects with data in start and end years
+  const projPerf = Object.values(byProj).map(p => {
+    if (p.n < 5) return null;
+    const sD = p.byY?.[sY]; const eD = p.byY?.[eY];
+    if (!sD || !eD) return null;
+    const sA = avg(sD.s, sD.n); const eA = avg(eD.s, eD.n);
+    if (sA <= 0 || eA <= 0) return null;
+    const lowConf = sD.n < 2 || eD.n < 2;
+    const absDiff = Math.round(eA - sA);
+    const pctChg = +((eA / sA - 1) * 100).toFixed(1);
+    const cagr = +((Math.pow(eA / sA, 1 / CAGR_WINDOW) - 1) * 100).toFixed(1);
+    const rp = hasRental ? rByProj[p.name] : null;
+    const yld = rp && eA > 0 ? +((rp.totalPsf / rp.n * 12 / eA) * 100).toFixed(2) : 0;
+    const totalReturn = +(cagr + yld).toFixed(2);
+    return {
+      name: p.name, dist: p.dist, seg: p.seg, street: '',
+      startPsf: Math.round(sA), endPsf: Math.round(eA),
+      absDiff, pctChg, cagr, yield: yld, totalReturn,
+      startYear: sY, endYear: eY, window: CAGR_WINDOW,
+      txStart: sD.n, txEnd: eD.n, txTotal: p.n, lowConf,
+    };
+  }).filter(Boolean).sort((a, b) => b.cagr - a.cagr);
+
+  // ── Transaction records ──
+  const mktSaleTx = [...sales].sort((a, b) => b.d.localeCompare(a.d)).slice(0, 500).map(r => ({
+    date: r.d, project: r.p, district: r.di, segment: r.sg, type: r.pt,
+    unit: r.fl, area: r.a, floor: r.fm, psf: r.ps, price: r.pr,
+  }));
+
+  const mktRentTx = rentals.length > 0
+    ? [...rentals].sort((a, b) => b.d.localeCompare(a.d)).slice(0, 500).map(r => ({
+        date: r.d, project: r.p, district: r.di, segment: r.sg, unit: '-',
+        area: r.af, bedrooms: r.br || '', floor: 0, rent: r.rn, rentPsf: r.rp,
+      }))
+    : [];
+
+  // ── Comparison pool — reuse from unfiltered cache (project-level detail needs full data) ──
+  const cmpPool = dashboardCache.cmpPool || [];
+  const projList = dashboardCache.projList || [];
+  const projIndex = dashboardCache.projIndex || {};
+  const distTopPsf = dashboardCache.distTopPsf || [];
+
+  // ── Rental stats — same fallback chain from latest date ──
+  let rentalWindowF, rentalPeriodLabel;
+  for (const months of [3, 6, 12]) {
+    const mAgo = new Date(ldY, ldM - months, 1);
+    const cutoff = `${mAgo.getFullYear()}-${String(mAgo.getMonth() + 1).padStart(2, '0')}`;
+    const filtered = rentals.filter(r => r.d >= cutoff);
+    if (filtered.length >= 20) { rentalWindowF = filtered; rentalPeriodLabel = `${months}M`; break; }
+  }
+  if (!rentalWindowF) { rentalWindowF = rentals; rentalPeriodLabel = 'all'; }
+  const latRentalTotal = rentalWindowF.length;
+  const avgRent = latRentalTotal > 0 ? Math.round(rentalWindowF.reduce((s, r) => s + r.rn, 0) / latRentalTotal) : Math.round(avgPsf * overallYield / 12 * avgArea);
+  const avgRentPsf = latRentalTotal > 0 ? +(rentalWindowF.reduce((s, r) => s + r.rp, 0) / latRentalTotal).toFixed(2) : +(avgPsf * overallYield / 12).toFixed(2);
+  const latRentalMed = latRentalTotal > 0 ? med(rentalWindowF.map(r => r.rn)) : avgRent;
+  const latRentalSegCounts = {};
+  for (const r of rentalWindowF) latRentalSegCounts[r.sg] = (latRentalSegCounts[r.sg] || 0) + 1;
+
+  return {
+    totalTx, avgPsf, medPsf, yoyPct, latestYear: latY, psfPeriod,
+    totalVolume: totalVol,
+    avgRent, avgRentPsf,
+    bestYield: yd[0] || null, hasRealRental: hasRental,
+    segCounts: { CCR: bySeg['CCR']?.n || 0, RCR: bySeg['RCR']?.n || 0, OCR: bySeg['OCR']?.n || 0 },
+    rentalTotal: latRentalTotal,
+    rentalPeriod: rentalPeriodLabel, // Independent rental window
+    rentalSegCounts: { CCR: latRentalSegCounts['CCR'] || 0, RCR: latRentalSegCounts['RCR'] || 0, OCR: latRentalSegCounts['OCR'] || 0 },
+    medRent: latRentalMed,
+    psfP5: pctl(0.05), psfP95: pctl(0.95), psfP25: pctl(0.25), psfP75: pctl(0.75),
+    years, quarters: qtrs, topDistricts: topDist, districtNames: dNames,
+    yoy, rTrend, sSeg, rSeg, sTop, rTop,
+    sDistLine, rDistLine, sDistBar, rDistBar,
+    sType, rType, sTenure,
+    sHist, rHist, sScat, rScat, sCum, rCum,
+    yd, cagrData, distPerf, projPerf,    avgCagr: distPerf.length > 0 ? +(distPerf.reduce((s, d) => s + d.cagr, 0) / distPerf.length).toFixed(1) : 0,
+    avgYield: yd.length > 0 ? +(yd.reduce((s, d) => s + d.y, 0) / yd.length).toFixed(2) : 0,
+    mktSaleTx, mktRentTx, cmpPool, projList, projIndex, distTopPsf,
+    // Filter metadata
+    appliedFilters: filters,
+    filteredSalesCount: sales.length,
+    filteredRentalCount: rentals.length,
+    lastUpdated: dashboardCache.lastUpdated,
+  };
+}
+
+export function getFilterOptions() {
+  const districts = [...new Set(salesStore.map(r => r.di))].sort(distSort);
+  const segments = [...new Set(salesStore.map(r => r.sg))].sort();
+  const types = [...new Set(salesStore.map(r => r.tp))].sort();
+  const tenures = [...new Set(salesStore.map(r => r.tn))].sort();
+  const propertyTypes = [...new Set(salesStore.map(r => r.pt))].sort();
+  const years = [...new Set(salesStore.map(r => r.d.slice(0, 4)))].sort();
+  // Rental-specific filters
+  const bedrooms = [...new Set(rentalStore.map(r => r.br).filter(b => b && b !== ''))].sort((a, b) => parseInt(a) - parseInt(b));
+  const areaSqftRanges = [
+    { label: 'Under 500 sf', value: '0-500' },
+    { label: '500 - 1,000 sf', value: '500-1000' },
+    { label: '1,000 - 1,500 sf', value: '1000-1500' },
+    { label: '1,500 - 2,000 sf', value: '1500-2000' },
+    { label: '2,000 - 3,000 sf', value: '2000-3000' },
+    { label: '3,000+ sf', value: '3000-99999' },
+  ];
+  return { districts, segments, types, tenures, propertyTypes, years, bedrooms, areaSqftRanges };
+}
