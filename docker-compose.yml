@@ -1,0 +1,52 @@
+# docker-compose.yml — Local development infrastructure
+# Usage:
+#   docker compose up -d          # Start Postgres + Redis
+#   npm run db:migrate            # Run migrations
+#   npm run dev                   # Start server with ENABLE_DB=true
+#   docker compose down -v        # Stop and remove volumes
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ura-postgres
+    environment:
+      POSTGRES_DB: ura_dev
+      POSTGRES_USER: ura
+      POSTGRES_PASSWORD: ura_local_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ura -d ura_dev"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: ura-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Optional: BullMQ dashboard (Bull Board)
+  # Uncomment to view queues at http://localhost:3100
+  # bull-board:
+  #   image: deadly0/bull-board
+  #   container_name: ura-bull-board
+  #   environment:
+  #     REDIS_HOST: redis
+  #     REDIS_PORT: 6379
+  #   ports:
+  #     - "3100:3000"
+  #   depends_on:
+  #     - redis
+
+volumes:
+  pgdata:
