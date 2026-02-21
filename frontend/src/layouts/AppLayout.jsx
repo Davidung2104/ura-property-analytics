@@ -107,7 +107,7 @@ function Shell({ children }) {
         .s { display:grid; grid-template-columns:repeat(auto-fill,minmax(155px,1fr)); gap:10px; margin-bottom:16px; }
         .g2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
         .g3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; }
-        @media(max-width:900px) { .g2,.g3 { grid-template-columns:1fr; } .s { grid-template-columns:repeat(2,1fr); } }
+        @media(max-width:1024px) { .g2,.g3 { grid-template-columns:1fr; } .s { grid-template-columns:repeat(2,1fr); } }
         select { background:#fff; color:${T.text}; border:1px solid #d1d5db; border-radius:6px; padding:8px 12px; font-size:${T.lg}px; cursor:pointer; outline:none; font-family:${T.sans}; }
         select option { background:#fff; }
         table { width:100%; border-collapse:collapse; font-size:${T.base}px; font-family:${T.sans}; }
