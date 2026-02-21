@@ -8,11 +8,12 @@ import { COLORS as P, T, yieldColor, growthColor, cagrColor } from '../../consta
 import Tip from '../ui/Tip';
 import { Card, SectionHeader, NoteText } from '../ui';
 
-export default function CompareTab({ proj, cmpPool, cmpSelected, setCmpSelected, mktData, nearbyProjects = [], selfYearPsf = {}, selfBedYearPsf = {}, bedOptions = [], masterFilters = {}, projList = [], projIndex = {} }) {
+export default function CompareTab({ proj, cmpPool, cmpSelected, setCmpSelected, mktData, nearbyProjects = [], selfYearPsf = {}, selfBedYearPsf = {}, selfYearPrice = {}, selfBedYearPrice = {}, bedOptions = [], masterFilters = {}, projList = [], projIndex = {} }) {
   const bedsFilter = masterFilters.beds || 'all';
   const masterYearFrom = masterFilters.yearFrom || '';
   const masterYearTo = masterFilters.yearTo || '';
   const [hmGradient, setHmGradient] = useState(true);
+  const [hmMetric, setHmMetric] = useState('psf'); // 'psf' or 'price'
 
   // Build unified lookup: nearbyProjects (from backend, has yearPsf) + cmpPool (top 30)
   const allProjects = useMemo(() => {
@@ -24,22 +25,29 @@ export default function CompareTab({ proj, cmpPool, cmpSelected, setCmpSelected,
     cmpSelected.forEach(name => {
       if (!map[name] && projIndex[name]) {
         const pi = projIndex[name];
-        map[name] = { name, dist: pi.dist, seg: pi.seg, psf: pi.psf || 0, n: pi.n || 0, yield: pi.yield || '0', street: pi.street || '', rent: 0, rel: 'other', yearPsf: pi.yearPsf || {}, avgArea: pi.avgArea || 0 };
+        map[name] = { name, dist: pi.dist, seg: pi.seg, psf: pi.psf || 0, n: pi.n || 0, yield: pi.yield || '0', street: pi.street || '', rent: 0, rel: 'other', yearPsf: pi.yearPsf || {}, yearPrice: pi.yearPrice || {}, avgArea: pi.avgArea || 0 };
       }
     });
     if (map[proj]) {
       map[proj].rel = 'self';
       if (!map[proj].yearPsf || Object.keys(map[proj].yearPsf).length === 0) map[proj].yearPsf = selfYearPsf;
       if (!map[proj].bedYearPsf) map[proj].bedYearPsf = selfBedYearPsf;
+      if (!map[proj].yearPrice || Object.keys(map[proj].yearPrice).length === 0) map[proj].yearPrice = selfYearPrice;
+      if (!map[proj].bedYearPrice) map[proj].bedYearPrice = selfBedYearPrice;
     } else {
-      map[proj] = { name: proj, rel: 'self', yearPsf: selfYearPsf, bedYearPsf: selfBedYearPsf };
+      map[proj] = { name: proj, rel: 'self', yearPsf: selfYearPsf, bedYearPsf: selfBedYearPsf, yearPrice: selfYearPrice, bedYearPrice: selfBedYearPrice };
     }
     return map;
-  }, [cmpPool, nearbyProjects, proj, selfYearPsf, selfBedYearPsf, cmpSelected, projIndex]);
+  }, [cmpPool, nearbyProjects, proj, selfYearPsf, selfBedYearPsf, selfYearPrice, selfBedYearPrice, cmpSelected, projIndex]);
 
   const getYearPsf = useCallback((p) => {
     if (bedsFilter !== 'all' && p?.bedYearPsf?.[bedsFilter]) return p.bedYearPsf[bedsFilter];
     return p?.yearPsf || {};
+  }, [bedsFilter]);
+
+  const getYearPrice = useCallback((p) => {
+    if (bedsFilter !== 'all' && p?.bedYearPrice?.[bedsFilter]) return p.bedYearPrice[bedsFilter];
+    return p?.yearPrice || {};
   }, [bedsFilter]);
 
   const getLatestPsf = useCallback((p) => {
@@ -54,21 +62,24 @@ export default function CompareTab({ proj, cmpPool, cmpSelected, setCmpSelected,
 
   // Heatmap data
   const nearbyHm = useMemo(() => {
-    if (!mktData?.years || !cmpSelected.length) return { projects: [], years: [], data: {}, vol: {} };
+    if (!mktData?.years || !cmpSelected.length) return { projects: [], years: [], data: {}, priceData: {}, vol: {} };
     const years = (mktData.years || []).slice(-7);
     const data = {};
+    const priceData = {};
     const vol = {};
     cmpSelected.forEach(name => {
       const p = allProjects[name];
       if (!p) return;
       const yp = bedsFilter !== 'all' && p.bedYearPsf?.[bedsFilter] ? p.bedYearPsf[bedsFilter] : p.yearPsf;
+      const ypr = bedsFilter !== 'all' && p.bedYearPrice?.[bedsFilter] ? p.bedYearPrice[bedsFilter] : p.yearPrice;
       if (!yp) return;
       years.forEach(y => {
         data[`${name}-${y}`] = yp[y] || 0;
+        priceData[`${name}-${y}`] = ypr?.[y] || 0;
         vol[`${name}-${y}`] = yp[y] ? 1 : 0;
       });
     });
-    return { projects: cmpSelected, years, data, vol };
+    return { projects: cmpSelected, years, data, priceData, vol };
   }, [mktData, cmpSelected, allProjects, bedsFilter]);
 
   // Init CAGR year range from heatmap years
@@ -89,10 +100,12 @@ export default function CompareTab({ proj, cmpPool, cmpSelected, setCmpSelected,
     return { ...p, psf };
   }).filter(p => p && p.psf > 0);
 
-  // Heatmap color helpers
-  const allHmVals = Object.values(nearbyHm.data).filter(v => v > 0);
+  // Heatmap color helpers (metric-aware)
+  const hmDataSource = hmMetric === 'price' ? nearbyHm.priceData : nearbyHm.data;
+  const allHmVals = Object.values(hmDataSource).filter(v => v > 0);
   const nearMin = allHmVals.length ? Math.min(...allHmVals) : 0;
   const nearMax = allHmVals.length ? Math.max(...allHmVals) : 1;
+  const fmtCell = (v) => hmMetric === 'price' ? (v >= 1e6 ? `$${(v / 1e6).toFixed(2)}M` : `$${Math.round(v / 1000)}K`) : `$${v.toLocaleString()}`;
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
@@ -169,6 +182,11 @@ export default function CompareTab({ proj, cmpPool, cmpSelected, setCmpSelected,
       <Card>
         {/* Heatmap controls */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', marginBottom: 12 }}>
+          <div style={{ display: 'flex', gap: 0, background: T.borderLt, borderRadius: T.r, padding: 2, border: '1px solid #e2e8f0' }}>
+            {[{ id: 'psf', l: 'PSF' }, { id: 'price', l: 'Sale Price' }].map(m =>
+              <button key={m.id} onClick={() => setHmMetric(m.id)} style={{ background: hmMetric === m.id ? '#a78bfa26' : 'transparent', border: hmMetric === m.id ? '1px solid #a78bfa4D' : '1px solid transparent', borderRadius: 6, padding: '5px 14px', fontSize: T.md, color: hmMetric === m.id ? T.purple : T.textSub, cursor: 'pointer', fontWeight: 600, fontFamily: T.mono }}>{m.l}</button>
+            )}
+          </div>
           <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: T.sm, color: T.textSub, fontWeight: 600 }}>
             <input type="checkbox" checked={hmGradient} onChange={() => setHmGradient(!hmGradient)} style={{ accentColor: T.purple }} />
             Colour gradient
@@ -188,12 +206,13 @@ export default function CompareTab({ proj, cmpPool, cmpSelected, setCmpSelected,
               })}
               <div style={{ width: 88, flexShrink: 0, textAlign: 'center', fontSize: 13, fontWeight: 700, color: T.text, padding: '12px 4px', background: '#f8fafc', borderLeft: '1px solid #e2e8f0' }}>Growth</div>
               <div style={{ width: 88, flexShrink: 0, textAlign: 'center', fontSize: 13, fontWeight: 700, color: T.text, padding: '12px 4px', background: '#f8fafc', borderLeft: '1px solid #f1f5f9' }}>CAGR</div>
-              <div style={{ width: 88, flexShrink: 0, textAlign: 'center', fontSize: 13, fontWeight: 700, color: T.text, padding: '12px 4px', background: '#f8fafc', borderLeft: '1px solid #f1f5f9' }}>Δ PSF</div>
-              <div style={{ width: 100, flexShrink: 0, textAlign: 'center', fontSize: 13, fontWeight: 700, color: T.text, padding: '12px 4px', background: '#f8fafc', borderLeft: '1px solid #f1f5f9' }}>Latest Price</div>
+              <div style={{ width: 96, flexShrink: 0, textAlign: 'center', fontSize: 13, fontWeight: 700, color: T.text, padding: '12px 4px', background: '#f8fafc', borderLeft: '1px solid #f1f5f9' }}>Δ PSF</div>
+              <div style={{ width: 110, flexShrink: 0, textAlign: 'center', fontSize: 13, fontWeight: 700, color: T.text, padding: '12px 4px', background: '#f8fafc', borderLeft: '1px solid #f1f5f9' }}>Δ Quantum</div>
             </div>
             {/* Data rows */}
             {nearbyHm.projects.map((pName, rowIdx) => {
               const isSelf = pName === proj;
+              // Growth/CAGR always from PSF
               let actualFromYear = '', actualToYear = '', fromPsf = 0, toPsf = 0;
               for (const y of visibleYears) {
                 const v = nearbyHm.data[`${pName}-${y}`];
@@ -203,21 +222,27 @@ export default function CompareTab({ proj, cmpPool, cmpSelected, setCmpSelected,
               const totalGrowth = fromPsf > 0 && toPsf > 0 && actualSpan > 0 ? Math.round((toPsf / fromPsf - 1) * 100) : 0;
               const cagr = fromPsf > 0 && toPsf > 0 && actualSpan > 0 ? +((Math.pow(toPsf / fromPsf, 1 / actualSpan) - 1) * 100).toFixed(1) : 0;
               const hasGrowthData = fromPsf > 0 && toPsf > 0 && actualSpan > 0;
+              // Δ Quantum: always from actual sale prices
+              let qFrom = 0, qTo = 0;
+              for (const y of visibleYears) {
+                const v = nearbyHm.priceData[`${pName}-${y}`];
+                if (v > 0) { if (!qFrom) qFrom = v; qTo = v; }
+              }
               const rowBg = isSelf ? '#f5f3ff' : rowIdx % 2 === 1 ? '#f8fafc' : '#fff';
               return <div key={pName} style={{ display: 'flex', borderBottom: '1px solid #e2e8f0', background: rowBg, transition: 'background 0.15s' }} onMouseEnter={e => { e.currentTarget.style.background = isSelf ? '#ede9fe' : '#f1f5f9'; }} onMouseLeave={e => { e.currentTarget.style.background = rowBg; }}>
                 <div style={{ width: 160, flexShrink: 0, fontSize: 13, fontWeight: isSelf ? 700 : 500, color: isSelf ? '#7c3aed' : T.text, padding: '14px 8px', display: 'flex', alignItems: 'center', gap: 6 }}>
                   {isSelf && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#7c3aed', flexShrink: 0 }} />}{pName}
                 </div>
                 {visibleYears.map(y => {
-                  const psf = nearbyHm.data[`${pName}-${y}`];
-                  if (!psf) return <div key={y} style={{ flex: 1, minWidth: 76, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center', color: T.textMute, fontSize: 13 }}>—</div>;
-                  const ratio = (nearMax > nearMin) ? Math.max(0, Math.min(1, (psf - nearMin) / (nearMax - nearMin))) : 0.5;
+                  const cellVal = hmDataSource[`${pName}-${y}`];
+                  if (!cellVal) return <div key={y} style={{ flex: 1, minWidth: 76, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center', color: T.textMute, fontSize: 13 }}>—</div>;
+                  const ratio = (nearMax > nearMin) ? Math.max(0, Math.min(1, (cellVal - nearMin) / (nearMax - nearMin))) : 0.5;
                   const hue = isSelf ? [124, 58, 237] : [2, 132, 199];
                   const bg = hmGradient
                     ? `rgba(${hue[0]},${hue[1]},${hue[2]},${0.08 + ratio * 0.52})`
                     : 'transparent';
                   const textColor = hmGradient && ratio > 0.45 ? '#fff' : T.text;
-                  return <div key={y} style={{ flex: 1, minWidth: 76, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontFamily: T.mono, fontWeight: isSelf ? 700 : 500, backgroundColor: bg, color: textColor, transition: 'all 0.15s', borderRadius: hmGradient ? 2 : 0 }} title={`${pName}, ${y}: $${psf.toLocaleString()} PSF`}>${psf.toLocaleString()}</div>;
+                  return <div key={y} style={{ flex: 1, minWidth: 76, height: 48, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: hmMetric === 'price' ? 13 : 14, fontFamily: T.mono, fontWeight: isSelf ? 700 : 500, backgroundColor: bg, color: textColor, transition: 'all 0.15s', borderRadius: hmGradient ? 2 : 0 }} title={`${pName}, ${y}: ${fmtCell(cellVal)}${hmMetric === 'psf' ? ' PSF' : ''}`}>{fmtCell(cellVal)}</div>;
                 })}
                 <div style={{ width: 88, flexShrink: 0, height: 48, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontFamily: T.mono, background: '#f8fafc', borderLeft: '1px solid #e2e8f0' }}>
                   {hasGrowthData ? <>
@@ -231,24 +256,25 @@ export default function CompareTab({ proj, cmpPool, cmpSelected, setCmpSelected,
                     <span style={{ fontSize: 10, color: T.textMute, fontWeight: 400 }}>{actualSpan}yr p.a.</span>
                   </> : <span style={{ color: T.textMute, fontSize: 13 }}>—</span>}
                 </div>
-                <div style={{ width: 88, flexShrink: 0, height: 48, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontFamily: T.mono, background: '#f8fafc', borderLeft: '1px solid #f1f5f9' }}>
+                <div style={{ width: 96, flexShrink: 0, height: 48, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontFamily: T.mono, background: '#f8fafc', borderLeft: '1px solid #f1f5f9' }}>
                   {hasGrowthData ? (() => {
-                    const diff = toPsf - fromPsf;
-                    const diffColor = diff > 0 ? T.green : diff < 0 ? T.red : T.textMute;
+                    const psfDiff = toPsf - fromPsf;
+                    const diffColor = psfDiff > 0 ? T.green : psfDiff < 0 ? T.red : T.textMute;
                     return <>
-                      <span style={{ fontSize: 14, fontWeight: 700, color: diffColor }}>{diff > 0 ? '+' : ''}{diff < 0 ? '-' : ''}${Math.abs(diff).toLocaleString()}</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: diffColor }}>{psfDiff > 0 ? '+' : ''}{psfDiff < 0 ? '-' : ''}${Math.abs(psfDiff).toLocaleString()}</span>
                       <span style={{ fontSize: 10, color: T.textMute, fontWeight: 400 }}>per sqft</span>
                     </>;
                   })() : <span style={{ color: T.textMute, fontSize: 13 }}>—</span>}
                 </div>
-                <div style={{ width: 100, flexShrink: 0, height: 48, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontFamily: T.mono, background: '#f8fafc', borderLeft: '1px solid #f1f5f9' }}>
-                  {toPsf > 0 ? (() => {
-                    const pEntry = allProjects[pName];
-                    const area = pEntry?.avgArea || 850;
-                    const price = toPsf * area;
+                <div style={{ width: 110, flexShrink: 0, height: 48, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', fontFamily: T.mono, background: '#f8fafc', borderLeft: '1px solid #f1f5f9' }}>
+                  {qFrom > 0 && qTo > 0 && qFrom !== qTo ? (() => {
+                    const diff = qTo - qFrom;
+                    const diffColor = diff > 0 ? T.green : diff < 0 ? T.red : T.textMute;
+                    const absDiff = Math.abs(diff);
+                    const fmtQ = absDiff >= 1e6 ? `$${(absDiff / 1e6).toFixed(1)}M` : absDiff >= 1000 ? `$${Math.round(absDiff / 1000)}K` : `$${absDiff.toLocaleString()}`;
                     return <>
-                      <span style={{ fontSize: 14, fontWeight: 700, color: T.blue }}>{price >= 1e6 ? `$${(price / 1e6).toFixed(2)}M` : `$${Math.round(price / 1000)}K`}</span>
-                      <span style={{ fontSize: 10, color: T.textMute, fontWeight: 400 }}>{area.toLocaleString()} sqft</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: diffColor }}>{diff > 0 ? '+' : '-'}{fmtQ}</span>
+                      <span style={{ fontSize: 10, color: T.textMute, fontWeight: 400 }}>avg txn</span>
                     </>;
                   })() : <span style={{ color: T.textMute, fontSize: 13 }}>—</span>}
                 </div>
@@ -258,13 +284,13 @@ export default function CompareTab({ proj, cmpPool, cmpSelected, setCmpSelected,
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10, marginTop: 14, fontSize: 12, color: T.textSub }}>
               {hmGradient && <><span>Low</span>
               <div style={{ width: 80, height: 8, borderRadius: 4, background: 'linear-gradient(to right, rgba(2,132,199,0.08), rgba(2,132,199,0.60))' }} />
-              <span>High PSF</span></>}
+              <span>High {hmMetric === 'price' ? 'Price' : 'PSF'}</span></>}
               <span style={{ marginLeft: 12 }}><span style={{ width: 6, height: 6, borderRadius: '50%', background: '#7c3aed', display: 'inline-block', verticalAlign: 'middle', marginRight: 4 }} /> selected project</span>
               {visibleYears.includes(currentYear) && <span style={{ marginLeft: 8 }}><span style={{ color: T.orange }}>*</span> = partial year (few txns)</span>}
             </div>
           </div>
         </div>
-        <NoteText style={{ marginTop: 12 }}>Growth, CAGR & Δ PSF use nearest available data within {effectiveFrom}–{effectiveTo}. Latest Price = latest PSF × avg unit area (from URA records). Adjust the year range above to change the timeframe.</NoteText>
+        <NoteText style={{ marginTop: 12 }}>Growth, CAGR & Δ PSF always based on PSF. Δ Quantum = difference in average sale price between first and last year with data (actual URA transactions). Toggle PSF / Sale Price to switch heatmap cells only.</NoteText>
       </Card>
       </>}
 
@@ -441,6 +467,8 @@ CompareTab.propTypes = {
   nearbyProjects: PropTypes.array,
   selfYearPsf: PropTypes.object,
   selfBedYearPsf: PropTypes.object,
+  selfYearPrice: PropTypes.object,
+  selfBedYearPrice: PropTypes.object,
   bedOptions: PropTypes.array,
   masterFilters: PropTypes.object,
   projList: PropTypes.array,
